@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import List
 
-from app.schemas import ScanMode, ScanRequest, ScanResponse, Violation
+from app.schemas import (
+    BatchScanResponse,
+    RuleReference,
+    RulesResponse,
+    ScanMode,
+    ScanRequest,
+    ScanResponse,
+    Violation,
+)
 from app.scoring import compliance_score, pour_breakdown
 
 DISCLAIMER = (
@@ -13,6 +21,27 @@ DISCLAIMER = (
     "with people who have disabilities. This API is a development and auditing tool, not a legal "
     "certification service."
 )
+
+SUPPORTED_RULES: List[RuleReference] = [
+    RuleReference(
+        rule_id="image-alt",
+        description="Image elements must have alternate text.",
+        wcag_sc="1.1.1",
+        impact="serious",
+    ),
+    RuleReference(
+        rule_id="html-has-lang",
+        description="The html element must have a lang attribute.",
+        wcag_sc="3.1.1",
+        impact="moderate",
+    ),
+    RuleReference(
+        rule_id="valid-anchor",
+        description="Anchor elements should have a valid href attribute.",
+        wcag_sc="2.4.4",
+        impact="minor",
+    ),
+]
 
 
 def run_scan(payload: ScanRequest) -> ScanResponse:
@@ -39,6 +68,16 @@ def run_scan(payload: ScanRequest) -> ScanResponse:
     )
 
 
+def run_batch_scan(scans: List[ScanRequest]) -> BatchScanResponse:
+    results = [run_scan(scan) for scan in scans]
+    average_score = int(sum(result.score for result in results) / len(results))
+    return BatchScanResponse(total_scans=len(results), average_score=average_score, results=results)
+
+
+def get_supported_rules() -> RulesResponse:
+    return RulesResponse(count=len(SUPPORTED_RULES), rules=SUPPORTED_RULES)
+
+
 def _collect_violations(source: str, include_remediation: bool) -> List[Violation]:
     findings: List[Violation] = []
     lower = source.lower()
@@ -52,7 +91,7 @@ def _collect_violations(source: str, include_remediation: bool) -> List[Violatio
                 wcag_sc="1.1.1",
                 selector="img",
                 include_remediation=include_remediation,
-                remediation="Add a meaningful alt attribute, or alt=\"\" for decorative images.",
+                remediation='Add a meaningful alt attribute, or alt="" for decorative images.',
             )
         )
 
@@ -65,7 +104,7 @@ def _collect_violations(source: str, include_remediation: bool) -> List[Violatio
                 wcag_sc="3.1.1",
                 selector="html",
                 include_remediation=include_remediation,
-                remediation="Set <html lang=\"en\"> (or appropriate BCP47 language tag).",
+                remediation='Set <html lang="en"> (or appropriate BCP47 language tag).',
             )
         )
 

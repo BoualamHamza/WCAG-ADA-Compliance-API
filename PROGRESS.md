@@ -1,6 +1,6 @@
 # Project Progress Tracker
 
-## Phase 1 — MVP (in progress)
+## Phase 1 — MVP (completed)
 
 ### Completed
 - Set up initial FastAPI service skeleton.
@@ -8,18 +8,24 @@
 - Added compliance scoring and POUR score breakdown.
 - Added mandatory coverage disclaimer in responses.
 - Added unit tests for health and scan behaviors.
+- Added Phase 2 kickoff endpoints for `POST /scan/batch` and `GET /rules`.
 
-### Next in Phase 1
-- Integrate real browser rendering and axe-core execution.
-- Expand response payload to include passes/incomplete node-level details.
-- Add rate limiting and API key middleware.
+## Phase 2 — In progress
+
+### Started
+- Batch scan orchestration via `POST /scan/batch` with combined results and average score.
+- Rules reference endpoint via `GET /rules` to expose supported checks.
+
+### Next in Phase 2
+- AI remediation detail levels (`brief`, `standard`, `verbose`) and locale support.
+- Webhook callback support for asynchronous scan notifications.
+- Expand response payload to include structured `passes` and `incomplete` arrays.
 
 ## Upcoming Phases
-- **Phase 2:** AI remediation, batch scan endpoints, rules endpoints, webhook support.
 - **Phase 3:** Async crawl jobs and diff endpoint.
 - **Phase 4:** Enterprise controls and integrations.
 
 
 ## Delivery Log
 - Phase 1 checkpoint committed.
-- Push attempted after Phase 1 checkpoint; depends on configured git remote.
+- Phase 2 kickoff in progress with batch and rules endpoints.
