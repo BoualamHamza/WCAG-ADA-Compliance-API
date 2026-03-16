@@ -1,2 +1,34 @@
 # WCAG-ADA-Compliance-API
-lets any application programmatically audit a web page, HTML snippet, or entire website for accessibility violations across WCAG 2.0, 2.1, 2.2, ADA, Section 508, and the European Accessibility Act (EAA).
+
+Developer-first API to audit URLs or HTML snippets for accessibility issues aligned with WCAG/ADA-focused reporting.
+
+## Phase 1 MVP (current)
+
+Implemented so far:
+- FastAPI service with:
+  - `GET /health`
+  - `POST /scan` (URL mode + HTML mode)
+- Structured JSON response with:
+  - violations
+  - totals
+  - score (0-100)
+  - POUR breakdown
+  - static scan warning
+  - legal coverage disclaimer
+- Initial unit tests with `pytest`
+- Progress tracking in [`PROGRESS.md`](./PROGRESS.md)
+
+## Quickstart
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+
+Run tests:
+
+```bash
+pytest -q
+```
