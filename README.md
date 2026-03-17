@@ -2,12 +2,14 @@
 
 Developer-first API to audit URLs or HTML snippets for accessibility issues aligned with WCAG/ADA-focused reporting.
 
-## Phase 1 MVP (current)
+## Current Status
 
 Implemented so far:
 - FastAPI service with:
   - `GET /health`
   - `POST /scan` (URL mode + HTML mode)
+  - `POST /scan/batch` (multi-target kickoff for Phase 2)
+  - `GET /rules` (supported rule catalog)
 - Structured JSON response with:
   - violations
   - totals

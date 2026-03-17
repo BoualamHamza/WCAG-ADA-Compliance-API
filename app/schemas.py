@@ -51,3 +51,25 @@ class ScanResponse(BaseModel):
     pour_breakdown: PourBreakdown
     static_scan_warning: bool = False
     coverage_disclaimer: str
+
+
+class BatchScanRequest(BaseModel):
+    scans: List[ScanRequest] = Field(min_length=1, max_length=10)
+
+
+class BatchScanResponse(BaseModel):
+    total_scans: int
+    average_score: int
+    results: List[ScanResponse]
+
+
+class RuleReference(BaseModel):
+    rule_id: str
+    description: str
+    wcag_sc: str
+    impact: str
+
+
+class RulesResponse(BaseModel):
+    count: int
+    rules: List[RuleReference]
