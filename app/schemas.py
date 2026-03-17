@@ -11,10 +11,18 @@ class ScanMode(str, Enum):
     HTML = "html"
 
 
+class RemediationDetailLevel(str, Enum):
+    BRIEF = "brief"
+    STANDARD = "standard"
+    VERBOSE = "verbose"
+
+
 class ScanRequest(BaseModel):
     url: Optional[HttpUrl] = None
     html: Optional[str] = None
     include_remediation: bool = Field(default=False)
+    remediation_detail_level: RemediationDetailLevel = Field(default=RemediationDetailLevel.STANDARD)
+    locale: str = Field(default="en")
     standards: List[str] = Field(default_factory=lambda: ["wcag2.1aa", "wcag2.2aa"])
 
     @model_validator(mode="after")

@@ -15,9 +15,9 @@
 ### Started
 - Batch scan orchestration via `POST /scan/batch` with combined results and average score.
 - Rules reference endpoint via `GET /rules` to expose supported checks.
+- AI remediation detail levels (`brief`, `standard`, `verbose`) and locale support for localized guidance.
 
 ### Next in Phase 2
-- AI remediation detail levels (`brief`, `standard`, `verbose`) and locale support.
 - Webhook callback support for asynchronous scan notifications.
 - Expand response payload to include structured `passes` and `incomplete` arrays.
 
@@ -29,3 +29,4 @@
 ## Delivery Log
 - Phase 1 checkpoint committed.
 - Phase 2 kickoff in progress with batch and rules endpoints.
+- Added remediation detail levels and locale-aware remediation messaging for scan output.
