@@ -1,16 +1,23 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
+from uuid import uuid4
 
 from app.schemas import (
     BatchScanResponse,
+    CheckFinding,
     RemediationDetailLevel,
+    RetryWebhookResponse,
     RuleReference,
     RulesResponse,
+    ScanDiffResponse,
     ScanMode,
     ScanRequest,
     ScanResponse,
     Violation,
+    WebhookDelivery,
+    WebhookDeliveryAttempt,
 )
 from app.scoring import compliance_score, pour_breakdown
 
@@ -23,6 +30,7 @@ DISCLAIMER = (
     "certification service."
 )
 
+WEBHOOK_DELIVERIES: Dict[str, WebhookDelivery] = {}
 
 REMEDIATION_LIBRARY: Dict[str, Dict[str, Dict[RemediationDetailLevel, str]]] = {
     "en": {
@@ -124,6 +132,8 @@ def run_scan(payload: ScanRequest) -> ScanResponse:
         remediation_detail_level=payload.remediation_detail_level,
         locale=payload.locale,
     )
+    passes = _collect_passes(source=source)
+    incomplete = _collect_incomplete(source=source)
 
     score = compliance_score(v.impact for v in violations)
     pour = pour_breakdown(score)
@@ -131,10 +141,12 @@ def run_scan(payload: ScanRequest) -> ScanResponse:
         scan_mode=mode,
         target=str(payload.url) if payload.url else "inline_html",
         violations=violations,
+        passes=passes,
+        incomplete=incomplete,
         totals={
             "violations": len(violations),
-            "incomplete": 0,
-            "passes": max(0, 40 - len(violations)),
+            "incomplete": len(incomplete),
+            "passes": len(passes),
             "inapplicable": 0,
         },
         score=score,
@@ -144,10 +156,59 @@ def run_scan(payload: ScanRequest) -> ScanResponse:
     )
 
 
-def run_batch_scan(scans: List[ScanRequest]) -> BatchScanResponse:
+def run_batch_scan(scans: List[ScanRequest], webhook_url: Optional[str] = None) -> BatchScanResponse:
     results = [run_scan(scan) for scan in scans]
     average_score = int(sum(result.score for result in results) / len(results))
-    return BatchScanResponse(total_scans=len(results), average_score=average_score, results=results)
+    callback = _register_webhook_delivery(url=webhook_url, total_scans=len(results)) if webhook_url else None
+    return BatchScanResponse(
+        total_scans=len(results),
+        average_score=average_score,
+        results=results,
+        callback=callback,
+    )
+
+
+def retry_webhook_delivery(delivery_id: str) -> RetryWebhookResponse:
+    callback = WEBHOOK_DELIVERIES.get(delivery_id)
+    if callback is None:
+        raise KeyError(delivery_id)
+
+    callback.attempts += 1
+    if callback.attempts >= callback.max_attempts:
+        callback.status = "failed"
+        callback.next_attempt_at = None
+        detail = "Maximum retry attempts reached."
+    else:
+        callback.status = "retrying"
+        callback.next_attempt_at = _iso_utc(datetime.now(timezone.utc) + timedelta(minutes=5))
+        detail = "Retry scheduled for callback delivery."
+
+    callback.history.append(
+        WebhookDeliveryAttempt(
+            attempt=callback.attempts,
+            status=callback.status,
+            timestamp=_iso_utc(datetime.now(timezone.utc)),
+            detail=detail,
+        )
+    )
+    WEBHOOK_DELIVERIES[delivery_id] = callback
+    return RetryWebhookResponse(callback=callback)
+
+
+def run_diff_scan(baseline: ScanRequest, current: ScanRequest) -> ScanDiffResponse:
+    baseline_scan = run_scan(baseline)
+    current_scan = run_scan(current)
+
+    baseline_ids = {item.rule_id for item in baseline_scan.violations}
+    current_ids = {item.rule_id for item in current_scan.violations}
+
+    return ScanDiffResponse(
+        baseline_score=baseline_scan.score,
+        current_score=current_scan.score,
+        score_delta=current_scan.score - baseline_scan.score,
+        new_violations=sorted(list(current_ids - baseline_ids)),
+        resolved_violations=sorted(list(baseline_ids - current_ids)),
+    )
 
 
 def get_supported_rules() -> RulesResponse:
@@ -217,6 +278,97 @@ def _collect_violations(
     return findings
 
 
+def _collect_passes(source: str) -> List[CheckFinding]:
+    passes: List[CheckFinding] = []
+    lower = source.lower()
+
+    if "<img" in lower and "alt=" in lower:
+        passes.append(
+            CheckFinding(
+                rule_id="image-alt",
+                message="Image elements include alternate text.",
+                wcag_sc="1.1.1",
+                impact="serious",
+                confidence=0.94,
+            )
+        )
+
+    if "<html" in lower and "lang=" in lower:
+        passes.append(
+            CheckFinding(
+                rule_id="html-has-lang",
+                message="The html element declares a language attribute.",
+                wcag_sc="3.1.1",
+                impact="moderate",
+                confidence=0.97,
+            )
+        )
+
+    if "<a" in lower and "href" in lower:
+        passes.append(
+            CheckFinding(
+                rule_id="valid-anchor",
+                message="Anchor elements include href destinations.",
+                wcag_sc="2.4.4",
+                impact="minor",
+                confidence=0.9,
+            )
+        )
+
+    return passes
+
+
+def _collect_incomplete(source: str) -> List[CheckFinding]:
+    lower = source.lower()
+    incomplete: List[CheckFinding] = []
+
+    if "<video" in lower:
+        incomplete.append(
+            CheckFinding(
+                rule_id="video-captions",
+                message="Video caption quality requires manual verification.",
+                wcag_sc="1.2.2",
+                impact="serious",
+                confidence=0.52,
+            )
+        )
+
+    if "onclick=" in lower:
+        incomplete.append(
+            CheckFinding(
+                rule_id="keyboard-operability",
+                message="Interactive keyboard behavior requires manual verification.",
+                wcag_sc="2.1.1",
+                impact="moderate",
+                confidence=0.48,
+            )
+        )
+
+    return incomplete
+
+
+def _register_webhook_delivery(url: Optional[str], total_scans: int) -> Optional[WebhookDelivery]:
+    if url is None:
+        return None
+    now = datetime.now(timezone.utc)
+    delivery_id = str(uuid4())
+    delivery = WebhookDelivery(
+        delivery_id=delivery_id,
+        webhook_url=url,
+        status="queued",
+        event="scan.batch.completed",
+        expected_notifications=1,
+        registered_at=_iso_utc(now),
+        total_scans=total_scans,
+        attempts=0,
+        max_attempts=3,
+        next_attempt_at=_iso_utc(now + timedelta(minutes=5)),
+        history=[],
+    )
+    WEBHOOK_DELIVERIES[delivery_id] = delivery
+    return delivery
+
+
 def _violation(
     rule_id: str,
     message: str,
@@ -247,3 +399,7 @@ def _remediation_for(rule_id: str, remediation_detail_level: RemediationDetailLe
     locale_key = _normalized_locale(locale)
     localized_library = REMEDIATION_LIBRARY.get(locale_key, REMEDIATION_LIBRARY["en"])
     return localized_library[rule_id][remediation_detail_level]
+
+
+def _iso_utc(value: datetime) -> str:
+    return value.isoformat()

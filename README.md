@@ -8,15 +8,20 @@ Implemented so far:
 - FastAPI service with:
   - `GET /health`
   - `POST /scan` (URL mode + HTML mode)
-  - `POST /scan/batch` (multi-target kickoff for Phase 2)
+  - `POST /scan/batch` (multi-target scans + optional webhook callback registration)
+  - `POST /scan/batch/{delivery_id}/retry` (retry tracking for queued webhook deliveries)
+  - `POST /scan/diff` (Phase 3 kickoff endpoint for baseline/current scan deltas)
   - `GET /rules` (supported rule catalog)
 - Structured JSON response with:
   - violations
+  - passes (rule metadata + confidence)
+  - incomplete (rule metadata + confidence)
   - totals
   - score (0-100)
   - POUR breakdown
   - static scan warning
   - legal coverage disclaimer
+- In-memory webhook delivery persistence and retry history tracking.
 - Initial unit tests with `pytest`
 - Progress tracking in [`PROGRESS.md`](./PROGRESS.md)
 
@@ -32,5 +37,5 @@ uvicorn app.main:app --reload
 Run tests:
 
 ```bash
-pytest -q
+PYTHONPATH=. pytest -q
 ```
