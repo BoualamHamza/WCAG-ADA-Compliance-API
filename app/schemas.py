@@ -43,6 +43,14 @@ class Violation(BaseModel):
     remediation: Optional[str] = None
 
 
+class CheckFinding(BaseModel):
+    rule_id: str
+    message: str
+    wcag_sc: str
+    impact: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 class PourBreakdown(BaseModel):
     perceivable: int
     operable: int
@@ -54,6 +62,8 @@ class ScanResponse(BaseModel):
     scan_mode: ScanMode
     target: str
     violations: List[Violation]
+    passes: List[CheckFinding] = Field(default_factory=list)
+    incomplete: List[CheckFinding] = Field(default_factory=list)
     totals: dict
     score: int
     pour_breakdown: PourBreakdown
@@ -63,12 +73,35 @@ class ScanResponse(BaseModel):
 
 class BatchScanRequest(BaseModel):
     scans: List[ScanRequest] = Field(min_length=1, max_length=10)
+    webhook_url: Optional[HttpUrl] = None
+
+
+class WebhookDeliveryAttempt(BaseModel):
+    attempt: int
+    status: str
+    timestamp: str
+    detail: str
+
+
+class WebhookDelivery(BaseModel):
+    delivery_id: str
+    webhook_url: str
+    status: str
+    event: str
+    expected_notifications: int
+    registered_at: str
+    total_scans: int
+    attempts: int
+    max_attempts: int
+    next_attempt_at: Optional[str] = None
+    history: List[WebhookDeliveryAttempt] = Field(default_factory=list)
 
 
 class BatchScanResponse(BaseModel):
     total_scans: int
     average_score: int
     results: List[ScanResponse]
+    callback: Optional[WebhookDelivery] = None
 
 
 class RuleReference(BaseModel):
@@ -81,3 +114,20 @@ class RuleReference(BaseModel):
 class RulesResponse(BaseModel):
     count: int
     rules: List[RuleReference]
+
+
+class RetryWebhookResponse(BaseModel):
+    callback: WebhookDelivery
+
+
+class ScanDiffRequest(BaseModel):
+    baseline: ScanRequest
+    current: ScanRequest
+
+
+class ScanDiffResponse(BaseModel):
+    baseline_score: int
+    current_score: int
+    score_delta: int
+    new_violations: List[str]
+    resolved_violations: List[str]
