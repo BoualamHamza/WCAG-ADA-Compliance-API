@@ -465,3 +465,153 @@ def test_scan_live_public_websites(url):
     assert "coverage_disclaimer" in body
     assert 0 <= body["score"] <= 100
     assert body["totals"]["violations"] >= 0
+
+
+def test_rule_detail_endpoint_returns_single_rule():
+    response = client.get('/rules/image-alt')
+    assert response.status_code == 200
+    assert response.json()['rule_id'] == 'image-alt'
+
+
+
+def test_custom_rule_set_can_be_created_listed_and_used_for_scan():
+    create_response = client.post(
+        '/rule-sets',
+        json={
+            'name': 'Enterprise Images Only',
+            'description': 'Focus on image rules for a custom enterprise policy.',
+            'include_rules': ['image-alt', 'html-has-lang'],
+            'disable_rules': ['html-has-lang'],
+        },
+    )
+    assert create_response.status_code == 201
+    rule_set = create_response.json()
+    assert rule_set['rule_count'] == 1
+
+    list_response = client.get('/rule-sets')
+    assert list_response.status_code == 200
+    assert any(item['rule_set_id'] == rule_set['rule_set_id'] for item in list_response.json()['rule_sets'])
+
+    scan_response = client.post(
+        '/scan',
+        json={
+            'html': "<html><body><img src='x.png'></body></html>",
+            'rule_set_id': rule_set['rule_set_id'],
+        },
+    )
+    assert scan_response.status_code == 200
+    body = scan_response.json()
+    assert [item['rule_id'] for item in body['violations']] == ['image-alt']
+    assert body['totals']['violations'] == 1
+
+
+
+def test_scan_run_only_and_disable_rules_filter_results():
+    response = client.post(
+        '/scan',
+        json={
+            'html': "<html><body><img src='x.png'></body></html>",
+            'run_only': ['image-alt', 'html-has-lang'],
+            'disable_rules': ['image-alt'],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert [item['rule_id'] for item in body['violations']] == ['html-has-lang']
+
+
+
+def test_create_job_with_rule_set_tracks_effective_rules(monkeypatch):
+    responses = {
+        'https://www.python.org': "<html><body><img src='x.png'></body></html>",
+    }
+    monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
+
+    rule_set_response = client.post(
+        '/rule-sets',
+        json={
+            'name': 'Images only crawl',
+            'include_rules': ['image-alt'],
+        },
+    )
+    assert rule_set_response.status_code == 201
+    rule_set_id = rule_set_response.json()['rule_set_id']
+
+    response = client.post(
+        '/jobs',
+        json={
+            'url': 'https://www.python.org',
+            'max_pages': 1,
+            'rule_set_id': rule_set_id,
+        },
+    )
+    assert response.status_code == 202
+    job = client.get(f"/jobs/{response.json()['job_id']}").json()
+    assert job['status'] == 'complete'
+    assert job['rule_set_id'] == rule_set_id
+    assert job['effective_rules'] == ['image-alt']
+    assert [item['rule_id'] for item in job['results'][0]['scan']['violations']] == ['image-alt']
+
+
+
+def test_invalid_rule_id_returns_validation_error():
+    response = client.post(
+        '/scan',
+        json={
+            'html': '<html></html>',
+            'run_only': ['not-a-real-rule'],
+        },
+    )
+    assert response.status_code == 422
+    assert 'Unsupported rule ids' in response.json()['detail']
+
+
+def test_rule_detail_endpoint_includes_manual_review_rule():
+    response = client.get('/rules/video-captions')
+    assert response.status_code == 200
+    assert response.json()['rule_id'] == 'video-captions'
+
+
+def test_get_rule_set_returns_effective_rules():
+    create_response = client.post(
+        '/rule-sets',
+        json={
+            'name': 'Manual review bundle',
+            'include_rules': ['video-captions', 'keyboard-operability', 'image-alt'],
+            'disable_rules': ['image-alt'],
+        },
+    )
+    assert create_response.status_code == 201
+    rule_set_id = create_response.json()['rule_set_id']
+
+    get_response = client.get(f'/rule-sets/{rule_set_id}')
+    assert get_response.status_code == 200
+    body = get_response.json()
+    assert body['effective_rules'] == ['keyboard-operability', 'video-captions']
+    assert body['rule_count'] == 2
+
+
+def test_scan_rejects_empty_effective_rule_selection():
+    response = client.post(
+        '/scan',
+        json={
+            'html': '<html></html>',
+            'run_only': ['image-alt'],
+            'disable_rules': ['image-alt'],
+        },
+    )
+    assert response.status_code == 422
+    assert 'At least one effective rule' in response.json()['detail']
+
+
+def test_create_rule_set_rejects_all_rules_disabled():
+    response = client.post(
+        '/rule-sets',
+        json={
+            'name': 'Invalid empty set',
+            'include_rules': ['image-alt'],
+            'disable_rules': ['image-alt'],
+        },
+    )
+    assert response.status_code == 422
+    assert 'At least one effective rule' in response.json()['detail']

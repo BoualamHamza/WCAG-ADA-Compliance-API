@@ -32,8 +32,15 @@
 - Added crawl politeness controls for `respect_robots_txt`, `request_delay_ms`, and custom `user_agent` handling.
 - Added crawl concurrency control via `max_concurrency` and richer per-page diff details for new/resolved violations on matching routes.
 
+## Phase 4 — In Progress
+
+### Completed this phase
+- Added `GET /rules/{id}` for single-rule detail retrieval.
+- Added enterprise custom rule set management with `GET /rule-sets`, `POST /rule-sets`, and `GET /rule-sets/{id}`, including resolved effective rule outputs.
+- Added `run_only`, `disable_rules`, and `rule_set_id` support for scans and crawl jobs so teams can apply reusable enterprise policies with non-empty effective rule validation.
+
 ## Upcoming Phases
-- **Phase 4:** Enterprise controls and integrations.
+- **Phase 4:** Additional enterprise controls and integrations (EU data residency, SSO, audit logs, Slack / GitHub Actions, editor/design tooling).
 
 ## Delivery Log
 - Phase 1 checkpoint committed.
@@ -47,3 +54,6 @@
 - Extended Phase 3 with live website fetching and crawl route inventory diff support.
 - Added configurable crawl depth/path filters, page-level crawl metadata, and live public-brand-site test coverage.
 - Completed Phase 3 with crawl politeness/concurrency controls and violation-level page diff reporting.
+
+- Started Phase 4 with custom rule set management, reusable enterprise scan policies, and single-rule detail lookup.
+- Refined Phase 4 rule targeting so the rule catalog also covers manual-review checks and saved rule sets expose their effective rules explicitly.

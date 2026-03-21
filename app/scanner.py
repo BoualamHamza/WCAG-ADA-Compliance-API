@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from collections import deque
 from html.parser import HTMLParser
-from typing import Deque, Dict, List, Optional
+from typing import Deque, Dict, List, Optional, Set
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 from uuid import uuid4
@@ -16,15 +16,18 @@ from app.schemas import (
     BatchScanResponse,
     CheckFinding,
     CrawlDiffResponse,
-    CrawlPageDiff,
-    CrawlPageResult,
     CrawlJobRequest,
     CrawlJobResponse,
     CrawlJobSummary,
+    CrawlPageDiff,
+    CrawlPageResult,
     JobStatus,
     RemediationDetailLevel,
     RetryWebhookResponse,
     RuleReference,
+    RuleSetCreateRequest,
+    RuleSetResponse,
+    RuleSetsResponse,
     RulesResponse,
     ScanDiffResponse,
     ScanMode,
@@ -47,8 +50,9 @@ DISCLAIMER = (
 
 WEBHOOK_DELIVERIES: Dict[str, WebhookDelivery] = {}
 CRAWL_JOBS: Dict[str, CrawlJobResponse] = {}
+RULE_SETS: Dict[str, RuleSetResponse] = {}
 REQUEST_TIMEOUT_SECONDS = 10.0
-DEFAULT_USER_AGENT = "AccessCheckBot/0.7.0"
+DEFAULT_USER_AGENT = "AccessCheckBot/0.8.1"
 
 REMEDIATION_LIBRARY: Dict[str, Dict[str, Dict[RemediationDetailLevel, str]]] = {
     "en": {
@@ -138,7 +142,21 @@ SUPPORTED_RULES: List[RuleReference] = [
         wcag_sc="2.4.4",
         impact="minor",
     ),
+    RuleReference(
+        rule_id="video-captions",
+        description="Video caption quality requires manual verification.",
+        wcag_sc="1.2.2",
+        impact="serious",
+    ),
+    RuleReference(
+        rule_id="keyboard-operability",
+        description="Interactive keyboard behavior requires manual verification.",
+        wcag_sc="2.1.1",
+        impact="moderate",
+    ),
 ]
+RULE_REFERENCE_MAP: Dict[str, RuleReference] = {rule.rule_id: rule for rule in SUPPORTED_RULES}
+SUPPORTED_RULE_IDS: Set[str] = set(RULE_REFERENCE_MAP)
 
 
 class _LinkExtractor(HTMLParser):
@@ -158,15 +176,21 @@ def run_scan(payload: ScanRequest) -> ScanResponse:
     mode = ScanMode.URL if payload.url else ScanMode.HTML
     target = str(payload.url) if payload.url else "inline_html"
     source = _resolve_scan_source(payload)
+    effective_rules = _resolve_effective_rules(
+        run_only=payload.run_only,
+        disable_rules=payload.disable_rules,
+        rule_set_id=payload.rule_set_id,
+    )
 
     violations = _collect_violations(
         source=source,
         include_remediation=payload.include_remediation,
         remediation_detail_level=payload.remediation_detail_level,
         locale=payload.locale,
+        effective_rules=effective_rules,
     )
-    passes = _collect_passes(source=source)
-    incomplete = _collect_incomplete(source=source)
+    passes = _collect_passes(source=source, effective_rules=effective_rules)
+    incomplete = _collect_incomplete(source=source, effective_rules=effective_rules)
 
     score = compliance_score(v.impact for v in violations)
     pour = pour_breakdown(score)
@@ -203,7 +227,16 @@ def run_batch_scan(scans: List[ScanRequest], webhook_url: Optional[str] = None) 
 
 def create_crawl_job(payload: CrawlJobRequest) -> CrawlJobResponse:
     now = datetime.now(timezone.utc)
+    effective_rules = sorted(
+        _resolve_effective_rules(
+            run_only=payload.run_only,
+            disable_rules=payload.disable_rules,
+            rule_set_id=payload.rule_set_id,
+        )
+    )
     job = CrawlJobResponse(
+        rule_set_id=payload.rule_set_id,
+        effective_rules=effective_rules,
         job_id=str(uuid4()),
         status=JobStatus.QUEUED,
         root_url=str(payload.url),
@@ -254,11 +287,13 @@ def process_crawl_job(job_id: str) -> CrawlJobResponse:
         scan_routes = route_inventory
         if job.max_concurrency > 1 and job.request_delay_ms == 0:
             with ThreadPoolExecutor(max_workers=job.max_concurrency) as executor:
-                results = list(executor.map(lambda route: _scan_crawl_route(route, job.user_agent), scan_routes))
+                results = list(
+                    executor.map(lambda route: _scan_crawl_route(route, job.user_agent, job.effective_rules), scan_routes)
+                )
         else:
             results = []
             for route in scan_routes:
-                results.append(_scan_crawl_route(route, job.user_agent))
+                results.append(_scan_crawl_route(route, job.user_agent, job.effective_rules))
                 if job.request_delay_ms > 0:
                     time.sleep(job.request_delay_ms / 1000)
         max_depth_reached = 0
@@ -404,6 +439,45 @@ def get_supported_rules() -> RulesResponse:
     return RulesResponse(count=len(SUPPORTED_RULES), rules=SUPPORTED_RULES)
 
 
+def get_rule_reference(rule_id: str) -> RuleReference:
+    rule = RULE_REFERENCE_MAP.get(rule_id)
+    if rule is None:
+        raise KeyError(rule_id)
+    return rule
+
+
+def create_rule_set(payload: RuleSetCreateRequest) -> RuleSetResponse:
+    include_rules = _validate_rule_ids(payload.include_rules)
+    disable_rules = _validate_rule_ids(payload.disable_rules)
+    effective_rules = _ensure_effective_rules(include_rules - disable_rules)
+
+    now = datetime.now(timezone.utc)
+    rule_set = RuleSetResponse(
+        rule_set_id=str(uuid4()),
+        name=payload.name,
+        description=payload.description,
+        include_rules=sorted(include_rules),
+        disable_rules=sorted(disable_rules),
+        effective_rules=sorted(effective_rules),
+        created_at=_iso_utc(now),
+        rule_count=len(effective_rules),
+    )
+    RULE_SETS[rule_set.rule_set_id] = rule_set
+    return rule_set
+
+
+def get_rule_set(rule_set_id: str) -> RuleSetResponse:
+    rule_set = RULE_SETS.get(rule_set_id)
+    if rule_set is None:
+        raise KeyError(rule_set_id)
+    return rule_set
+
+
+def get_rule_sets() -> RuleSetsResponse:
+    rule_sets = sorted(RULE_SETS.values(), key=lambda item: item.created_at)
+    return RuleSetsResponse(count=len(rule_sets), rule_sets=rule_sets)
+
+
 def discover_routes(
     root_url: str,
     max_pages: int,
@@ -415,7 +489,7 @@ def discover_routes(
     allowed_path_prefixes: Optional[List[str]] = None,
     excluded_path_prefixes: Optional[List[str]] = None,
 ) -> List[dict]:
-    normalized_root_url = root_url.rstrip('/') or root_url
+    normalized_root_url = root_url.rstrip("/") or root_url
     allowed_path_prefixes = allowed_path_prefixes or []
     excluded_path_prefixes = excluded_path_prefixes or []
     routes: List[dict] = [{"url": normalized_root_url, "depth": 0, "parent_url": None}]
@@ -525,9 +599,9 @@ def _load_robots_parser(root_url: str, user_agent: str) -> RobotFileParser:
     return parser
 
 
-def _scan_crawl_route(route: dict, user_agent: str) -> CrawlPageResult:
+def _scan_crawl_route(route: dict, user_agent: str, effective_rules: Optional[List[str]] = None) -> CrawlPageResult:
     source = _fetch_url_content(route["url"], user_agent=user_agent)
-    scan = run_scan(ScanRequest(html=source))
+    scan = run_scan(ScanRequest(html=source, run_only=effective_rules))
     scan.scan_mode = ScanMode.URL
     scan.target = route["url"]
     scan.static_scan_warning = False
@@ -546,11 +620,12 @@ def _collect_violations(
     include_remediation: bool,
     remediation_detail_level: RemediationDetailLevel,
     locale: str,
+    effective_rules: Set[str],
 ) -> List[Violation]:
     findings: List[Violation] = []
     lower = source.lower()
 
-    if "<img" in lower and "alt=" not in lower:
+    if "image-alt" in effective_rules and "<img" in lower and "alt=" not in lower:
         findings.append(
             _violation(
                 rule_id="image-alt",
@@ -567,7 +642,7 @@ def _collect_violations(
             )
         )
 
-    if "<html" in lower and "lang=" not in lower:
+    if "html-has-lang" in effective_rules and "<html" in lower and "lang=" not in lower:
         findings.append(
             _violation(
                 rule_id="html-has-lang",
@@ -584,7 +659,7 @@ def _collect_violations(
             )
         )
 
-    if "<a" in lower and "href" not in lower:
+    if "valid-anchor" in effective_rules and "<a" in lower and "href" not in lower:
         findings.append(
             _violation(
                 rule_id="valid-anchor",
@@ -604,11 +679,11 @@ def _collect_violations(
     return findings
 
 
-def _collect_passes(source: str) -> List[CheckFinding]:
+def _collect_passes(source: str, effective_rules: Set[str]) -> List[CheckFinding]:
     passes: List[CheckFinding] = []
     lower = source.lower()
 
-    if "<img" in lower and "alt=" in lower:
+    if "image-alt" in effective_rules and "<img" in lower and "alt=" in lower:
         passes.append(
             CheckFinding(
                 rule_id="image-alt",
@@ -619,7 +694,7 @@ def _collect_passes(source: str) -> List[CheckFinding]:
             )
         )
 
-    if "<html" in lower and "lang=" in lower:
+    if "html-has-lang" in effective_rules and "<html" in lower and "lang=" in lower:
         passes.append(
             CheckFinding(
                 rule_id="html-has-lang",
@@ -630,7 +705,7 @@ def _collect_passes(source: str) -> List[CheckFinding]:
             )
         )
 
-    if "<a" in lower and "href" in lower:
+    if "valid-anchor" in effective_rules and "<a" in lower and "href" in lower:
         passes.append(
             CheckFinding(
                 rule_id="valid-anchor",
@@ -644,11 +719,11 @@ def _collect_passes(source: str) -> List[CheckFinding]:
     return passes
 
 
-def _collect_incomplete(source: str) -> List[CheckFinding]:
+def _collect_incomplete(source: str, effective_rules: Set[str]) -> List[CheckFinding]:
     lower = source.lower()
     incomplete: List[CheckFinding] = []
 
-    if "<video" in lower:
+    if "video-captions" in effective_rules and "<video" in lower:
         incomplete.append(
             CheckFinding(
                 rule_id="video-captions",
@@ -659,7 +734,7 @@ def _collect_incomplete(source: str) -> List[CheckFinding]:
             )
         )
 
-    if "onclick=" in lower:
+    if "keyboard-operability" in effective_rules and "onclick=" in lower:
         incomplete.append(
             CheckFinding(
                 rule_id="keyboard-operability",
@@ -712,6 +787,34 @@ def _violation(
         selector=selector,
         remediation=remediation if include_remediation else None,
     )
+
+
+def _validate_rule_ids(rule_ids: Optional[List[str]]) -> Set[str]:
+    selected = set(rule_ids or [])
+    unknown = sorted(selected - SUPPORTED_RULE_IDS)
+    if unknown:
+        raise ValueError(f"Unsupported rule ids: {', '.join(unknown)}")
+    return selected
+
+
+def _ensure_effective_rules(rule_ids: Set[str]) -> Set[str]:
+    if not rule_ids:
+        raise ValueError("At least one effective rule must remain after applying filters.")
+    return rule_ids
+
+
+def _resolve_effective_rules(
+    run_only: Optional[List[str]] = None,
+    disable_rules: Optional[List[str]] = None,
+    rule_set_id: Optional[str] = None,
+) -> Set[str]:
+    disabled = _validate_rule_ids(disable_rules)
+    selected = SUPPORTED_RULE_IDS.copy()
+    if rule_set_id:
+        selected = set(get_rule_set(rule_set_id).effective_rules)
+    if run_only is not None:
+        selected = _validate_rule_ids(run_only)
+    return _ensure_effective_rules(selected - disabled)
 
 
 def _normalized_locale(locale: str) -> str:
