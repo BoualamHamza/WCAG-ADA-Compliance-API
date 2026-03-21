@@ -21,16 +21,18 @@
 
 ## Phase 3 — In progress
 
-### Started
+### Completed this phase
 - Added `POST /scan/diff` endpoint to compare baseline/current scans and report score deltas plus violation changes.
+- Added async crawl job lifecycle support with `POST /jobs`, `GET /jobs/{job_id}`, and `DELETE /jobs/{job_id}`.
+- Added live URL fetching for public site scans so URL mode analyzes retrieved HTML instead of only the URL string.
+- Added discovered route inventory diffing with `POST /jobs/diff` and average score delta reporting for completed crawl jobs.
 
 ### Next in Phase 3
-- Async crawl jobs lifecycle endpoints and in-memory job state.
-- Diff support for crawled route inventories.
+- Expand crawl configuration controls beyond the initial same-site route discovery flow.
+- Add richer crawl result metadata for per-page change tracking across crawl diffs.
 
 ## Upcoming Phases
 - **Phase 4:** Enterprise controls and integrations.
-
 
 ## Delivery Log
 - Phase 1 checkpoint committed.
@@ -40,3 +42,5 @@
 - Expanded scan response payload with structured `passes` and `incomplete` arrays.
 - Added webhook delivery persistence with retry history tracking.
 - Started Phase 3 with scan diff capabilities.
+- Completed async crawl jobs lifecycle endpoints and in-memory job tracking.
+- Extended Phase 3 with live website fetching and crawl route inventory diff support.

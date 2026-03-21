@@ -17,6 +17,14 @@ class RemediationDetailLevel(str, Enum):
     VERBOSE = "verbose"
 
 
+class JobStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETE = "complete"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class ScanRequest(BaseModel):
     url: Optional[HttpUrl] = None
     html: Optional[str] = None
@@ -131,3 +139,45 @@ class ScanDiffResponse(BaseModel):
     score_delta: int
     new_violations: List[str]
     resolved_violations: List[str]
+
+
+class CrawlJobRequest(BaseModel):
+    url: HttpUrl
+    max_pages: int = Field(default=25, ge=1, le=500)
+    include_subdomains: bool = False
+
+
+class CrawlJobSummary(BaseModel):
+    pages_scanned: int
+    pages_remaining: int
+    route_inventory: List[str] = Field(default_factory=list)
+
+
+class CrawlJobResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    root_url: str
+    max_pages: int
+    include_subdomains: bool
+    created_at: str
+    updated_at: str
+    completed_at: Optional[str] = None
+    summary: CrawlJobSummary
+    results: List[ScanResponse] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class CrawlDiffRequest(BaseModel):
+    baseline_job_id: str
+    current_job_id: str
+
+
+class CrawlDiffResponse(BaseModel):
+    baseline_job_id: str
+    current_job_id: str
+    baseline_pages: int
+    current_pages: int
+    pages_added: List[str]
+    pages_removed: List[str]
+    pages_unchanged: List[str]
+    average_score_delta: int

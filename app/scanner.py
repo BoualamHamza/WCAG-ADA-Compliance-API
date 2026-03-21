@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from typing import Dict, List, Optional
+from urllib.parse import urljoin, urlparse
 from uuid import uuid4
+
+import httpx
 
 from app.schemas import (
     BatchScanResponse,
     CheckFinding,
+    CrawlDiffResponse,
+    CrawlJobRequest,
+    CrawlJobResponse,
+    CrawlJobSummary,
+    JobStatus,
     RemediationDetailLevel,
     RetryWebhookResponse,
     RuleReference,
@@ -31,6 +40,8 @@ DISCLAIMER = (
 )
 
 WEBHOOK_DELIVERIES: Dict[str, WebhookDelivery] = {}
+CRAWL_JOBS: Dict[str, CrawlJobResponse] = {}
+REQUEST_TIMEOUT_SECONDS = 10.0
 
 REMEDIATION_LIBRARY: Dict[str, Dict[str, Dict[RemediationDetailLevel, str]]] = {
     "en": {
@@ -123,9 +134,24 @@ SUPPORTED_RULES: List[RuleReference] = [
 ]
 
 
+class _LinkExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
+        if tag != "a":
+            return
+        href = dict(attrs).get("href")
+        if href:
+            self.links.append(href)
+
+
 def run_scan(payload: ScanRequest) -> ScanResponse:
     mode = ScanMode.URL if payload.url else ScanMode.HTML
-    source = str(payload.url) if payload.url else (payload.html or "")
+    target = str(payload.url) if payload.url else "inline_html"
+    source = _resolve_scan_source(payload)
+
     violations = _collect_violations(
         source=source,
         include_remediation=payload.include_remediation,
@@ -139,7 +165,7 @@ def run_scan(payload: ScanRequest) -> ScanResponse:
     pour = pour_breakdown(score)
     return ScanResponse(
         scan_mode=mode,
-        target=str(payload.url) if payload.url else "inline_html",
+        target=target,
         violations=violations,
         passes=passes,
         incomplete=incomplete,
@@ -165,6 +191,105 @@ def run_batch_scan(scans: List[ScanRequest], webhook_url: Optional[str] = None) 
         average_score=average_score,
         results=results,
         callback=callback,
+    )
+
+
+def create_crawl_job(payload: CrawlJobRequest) -> CrawlJobResponse:
+    now = datetime.now(timezone.utc)
+    job = CrawlJobResponse(
+        job_id=str(uuid4()),
+        status=JobStatus.QUEUED,
+        root_url=str(payload.url),
+        max_pages=payload.max_pages,
+        include_subdomains=payload.include_subdomains,
+        created_at=_iso_utc(now),
+        updated_at=_iso_utc(now),
+        summary=CrawlJobSummary(pages_scanned=0, pages_remaining=payload.max_pages, route_inventory=[]),
+        results=[],
+    )
+    CRAWL_JOBS[job.job_id] = job
+    return job
+
+
+def process_crawl_job(job_id: str) -> CrawlJobResponse:
+    job = get_crawl_job(job_id)
+    if job.status in {JobStatus.CANCELLED, JobStatus.COMPLETE, JobStatus.FAILED}:
+        return job
+
+    started = datetime.now(timezone.utc)
+    job.status = JobStatus.RUNNING
+    job.updated_at = _iso_utc(started)
+
+    try:
+        route_inventory = discover_routes(job.root_url, job.max_pages, include_subdomains=job.include_subdomains)
+        results = [run_scan(ScanRequest(url=route)) for route in route_inventory]
+    except Exception as error:  # noqa: BLE001
+        failed = datetime.now(timezone.utc)
+        job.status = JobStatus.FAILED
+        job.updated_at = _iso_utc(failed)
+        job.completed_at = _iso_utc(failed)
+        job.error = str(error)
+        CRAWL_JOBS[job_id] = job
+        return job
+
+    finished = datetime.now(timezone.utc)
+    job.status = JobStatus.COMPLETE
+    job.updated_at = _iso_utc(finished)
+    job.completed_at = _iso_utc(finished)
+    job.summary = CrawlJobSummary(
+        pages_scanned=len(results),
+        pages_remaining=max(job.max_pages - len(results), 0),
+        route_inventory=route_inventory,
+    )
+    job.results = results
+    CRAWL_JOBS[job_id] = job
+    return job
+
+
+def get_crawl_job(job_id: str) -> CrawlJobResponse:
+    job = CRAWL_JOBS.get(job_id)
+    if job is None:
+        raise KeyError(job_id)
+    return job
+
+
+def cancel_crawl_job(job_id: str) -> CrawlJobResponse:
+    job = get_crawl_job(job_id)
+    if job.status == JobStatus.COMPLETE:
+        return job
+
+    now = datetime.now(timezone.utc)
+    job.status = JobStatus.CANCELLED
+    job.updated_at = _iso_utc(now)
+    job.completed_at = _iso_utc(now)
+    job.summary.pages_remaining = max(job.max_pages - job.summary.pages_scanned, 0)
+    CRAWL_JOBS[job_id] = job
+    return job
+
+
+def run_crawl_diff(baseline_job_id: str, current_job_id: str) -> CrawlDiffResponse:
+    baseline_job = get_crawl_job(baseline_job_id)
+    current_job = get_crawl_job(current_job_id)
+
+    if baseline_job.status != JobStatus.COMPLETE or current_job.status != JobStatus.COMPLETE:
+        raise ValueError("Both crawl jobs must be complete before diffing.")
+
+    baseline_routes = set(baseline_job.summary.route_inventory)
+    current_routes = set(current_job.summary.route_inventory)
+    baseline_scores = [result.score for result in baseline_job.results]
+    current_scores = [result.score for result in current_job.results]
+    baseline_average = int(sum(baseline_scores) / len(baseline_scores)) if baseline_scores else 0
+    current_average = int(sum(current_scores) / len(current_scores)) if current_scores else 0
+
+    return CrawlDiffResponse(
+        baseline_job_id=baseline_job_id,
+        current_job_id=current_job_id,
+        baseline_pages=len(baseline_routes),
+        current_pages=len(current_routes),
+        pages_added=sorted(current_routes - baseline_routes),
+        pages_removed=sorted(baseline_routes - current_routes),
+        pages_unchanged=sorted(baseline_routes & current_routes),
+        average_score_delta=current_average - baseline_average,
     )
 
 
@@ -213,6 +338,63 @@ def run_diff_scan(baseline: ScanRequest, current: ScanRequest) -> ScanDiffRespon
 
 def get_supported_rules() -> RulesResponse:
     return RulesResponse(count=len(SUPPORTED_RULES), rules=SUPPORTED_RULES)
+
+
+def discover_routes(root_url: str, max_pages: int, include_subdomains: bool = False) -> List[str]:
+    normalized_root_url = root_url.rstrip('/') or root_url
+    html = _fetch_url_content(normalized_root_url)
+    discovered = _extract_same_site_links(normalized_root_url, html, include_subdomains=include_subdomains)
+    routes = [normalized_root_url]
+    for link in discovered:
+        if link not in routes:
+            routes.append(link)
+        if len(routes) >= max_pages:
+            break
+    return routes[:max_pages]
+
+
+def _resolve_scan_source(payload: ScanRequest) -> str:
+    if payload.html:
+        return payload.html
+    if payload.url:
+        try:
+            return _fetch_url_content(str(payload.url))
+        except httpx.HTTPError:
+            return str(payload.url)
+    return ""
+
+
+def _fetch_url_content(url: str) -> str:
+    with httpx.Client(follow_redirects=True, timeout=REQUEST_TIMEOUT_SECONDS) as client:
+        response = client.get(url)
+        response.raise_for_status()
+        return response.text
+
+
+def _extract_same_site_links(root_url: str, html: str, include_subdomains: bool = False) -> List[str]:
+    parser = _LinkExtractor()
+    parser.feed(html)
+    root = urlparse(root_url)
+    links: List[str] = []
+    for href in parser.links:
+        absolute = urljoin(root_url, href)
+        parsed = urlparse(absolute)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        if not _is_same_site(root.hostname or "", parsed.hostname or "", include_subdomains):
+            continue
+        normalized = absolute.rstrip("/") or absolute
+        if normalized not in links:
+            links.append(normalized)
+    return links
+
+
+def _is_same_site(root_host: str, candidate_host: str, include_subdomains: bool) -> bool:
+    if candidate_host == root_host:
+        return True
+    if include_subdomains and candidate_host.endswith(f".{root_host}"):
+        return True
+    return False
 
 
 def _collect_violations(
