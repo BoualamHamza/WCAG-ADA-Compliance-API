@@ -38,6 +38,8 @@
 - Added `GET /rules/{id}` for single-rule detail retrieval.
 - Added enterprise custom rule set management with `GET /rule-sets`, `POST /rule-sets`, and `GET /rule-sets/{id}`, including resolved effective rule outputs.
 - Added `run_only`, `disable_rules`, and `rule_set_id` support for scans and crawl jobs so teams can apply reusable enterprise policies with non-empty effective rule validation.
+- Added `GET /standards` plus standards metadata on rule references so API consumers can map rules to WCAG/Section 508/EAA coverage.
+- Added enterprise audit trail endpoints with `GET /audit-logs` and `GET /audit-logs/{event_id}` covering scans, crawl jobs, rule sets, and webhook registrations.
 
 ## Upcoming Phases
 - **Phase 4:** Additional enterprise controls and integrations (EU data residency, SSO, audit logs, Slack / GitHub Actions, editor/design tooling).
@@ -57,3 +59,4 @@
 
 - Started Phase 4 with custom rule set management, reusable enterprise scan policies, and single-rule detail lookup.
 - Refined Phase 4 rule targeting so the rule catalog also covers manual-review checks and saved rule sets expose their effective rules explicitly.
+- Expanded Phase 4 with standards catalog coverage metadata and in-memory enterprise audit logging endpoints.

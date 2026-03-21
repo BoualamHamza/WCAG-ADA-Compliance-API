@@ -114,6 +114,15 @@ def test_rules_endpoint():
     body = response.json()
     assert body["count"] >= 1
     assert any(rule["rule_id"] == "image-alt" for rule in body["rules"])
+    assert any("wcag22aa" in rule["standards"] for rule in body["rules"])
+
+
+def test_standards_endpoint():
+    response = client.get('/standards')
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] >= 1
+    assert any(item["standard_id"] == "wcag22aa" and item["is_default"] for item in body["standards"])
 
 
 def test_scan_remediation_detail_levels():
@@ -518,6 +527,38 @@ def test_scan_run_only_and_disable_rules_filter_results():
     assert response.status_code == 200
     body = response.json()
     assert [item['rule_id'] for item in body['violations']] == ['html-has-lang']
+
+
+def test_audit_logs_capture_scan_and_rule_set_activity():
+    create_response = client.post(
+        '/rule-sets',
+        json={
+            'name': 'Audit Trail Policy',
+            'include_rules': ['image-alt'],
+        },
+    )
+    assert create_response.status_code == 201
+    rule_set_id = create_response.json()['rule_set_id']
+
+    scan_response = client.post(
+        '/scan',
+        json={
+            'html': "<html><body><img src='x.png'></body></html>",
+            'rule_set_id': rule_set_id,
+        },
+    )
+    assert scan_response.status_code == 200
+
+    logs_response = client.get('/audit-logs')
+    assert logs_response.status_code == 200
+    logs = logs_response.json()['audit_logs']
+    assert any(item['event_type'] == 'rule_set.created' and item['resource_id'] == rule_set_id for item in logs)
+    scan_log = next(item for item in logs if item['event_type'] == 'scan.completed')
+    assert scan_log['metadata']['rule_set_id'] == rule_set_id
+
+    detail_response = client.get(f"/audit-logs/{scan_log['event_id']}")
+    assert detail_response.status_code == 200
+    assert detail_response.json()['event_id'] == scan_log['event_id']
 
 
 
