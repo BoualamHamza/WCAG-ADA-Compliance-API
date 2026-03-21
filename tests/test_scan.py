@@ -1,9 +1,41 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
+import app.scanner as scanner
 
 
 client = TestClient(app)
+
+
+class MockResponse:
+    def __init__(self, text: str, status_code: int = 200):
+        self.text = text
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise scanner.httpx.HTTPStatusError(
+                "mock error",
+                request=scanner.httpx.Request("GET", "https://example.com"),
+                response=scanner.httpx.Response(self.status_code),
+            )
+
+
+class MockClient:
+    def __init__(self, responses: dict[str, str]):
+        self.responses = responses
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, url: str):
+        normalized = url.rstrip('/') or url
+        if normalized not in self.responses:
+            raise scanner.httpx.ConnectError("mock connect error")
+        return MockResponse(self.responses[normalized])
 
 
 def test_health():
@@ -25,10 +57,17 @@ def test_scan_html_mode_and_warning():
     assert body["violations"][0]["remediation"]
 
 
-def test_scan_url_mode():
+def test_scan_url_mode(monkeypatch):
+    responses = {
+        "https://example.com": "<html lang='en'><body><a href='/about'>About</a></body></html>",
+    }
+    monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
+
     response = client.post('/scan', json={"url": "https://example.com"})
     assert response.status_code == 200
-    assert response.json()["scan_mode"] == "url"
+    body = response.json()
+    assert body["scan_mode"] == "url"
+    assert body["totals"]["passes"] >= 1
 
 
 def test_scan_requires_exactly_one_input():
@@ -36,7 +75,12 @@ def test_scan_requires_exactly_one_input():
     assert response.status_code == 422
 
 
-def test_batch_scan():
+def test_batch_scan(monkeypatch):
+    responses = {
+        "https://example.com": "<html lang='en'><body><a href='/about'>About</a></body></html>",
+    }
+    monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
+
     response = client.post(
         '/scan/batch',
         json={
@@ -140,7 +184,12 @@ def test_scan_includes_structured_passes_and_incomplete_arrays_with_metadata():
     assert 0 <= video_captions_incomplete["confidence"] <= 1
 
 
-def test_batch_scan_supports_webhook_callback_registration_and_retry():
+def test_batch_scan_supports_webhook_callback_registration_and_retry(monkeypatch):
+    responses = {
+        "https://example.com": "<html lang='en'><body><a href='/about'>About</a></body></html>",
+    }
+    monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
+
     response = client.post(
         '/scan/batch',
         json={
@@ -188,3 +237,79 @@ def test_scan_diff_reports_delta_and_violation_changes():
     body = response.json()
     assert body["score_delta"] > 0
     assert "image-alt" in body["resolved_violations"]
+
+
+def test_create_job_processes_real_route_inventory(monkeypatch):
+    responses = {
+        "https://example.com": "<html lang='en'><body><a href='/about'>About</a><a href='/contact'>Contact</a></body></html>",
+        "https://example.com/about": "<html lang='en'><body><img src='logo.png' alt='Logo'></body></html>",
+        "https://example.com/contact": "<html><body><img src='map.png'></body></html>",
+    }
+    monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
+
+    response = client.post('/jobs', json={"url": "https://example.com", "max_pages": 3})
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+
+    job_response = client.get(f'/jobs/{job_id}')
+    assert job_response.status_code == 200
+    job = job_response.json()
+    assert job["status"] == "complete"
+    assert job["summary"]["pages_scanned"] == 3
+    assert job["summary"]["route_inventory"] == [
+        "https://example.com",
+        "https://example.com/about",
+        "https://example.com/contact",
+    ]
+    assert len(job["results"]) == 3
+    assert job["results"][2]["totals"]["violations"] >= 1
+
+
+def test_jobs_diff_reports_route_inventory_changes(monkeypatch):
+    responses = {
+        "https://example.com": "<html lang='en'><body><a href='/about'>About</a></body></html>",
+        "https://example.com/about": "<html lang='en'><body>About</body></html>",
+        "https://example.org": "<html lang='en'><body><a href='/about'>About</a><a href='/contact'>Contact</a></body></html>",
+        "https://example.org/about": "<html lang='en'><body>About</body></html>",
+        "https://example.org/contact": "<html><body><img src='office.png'></body></html>",
+    }
+    monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
+
+    baseline = client.post('/jobs', json={"url": "https://example.com", "max_pages": 2})
+    current = client.post('/jobs', json={"url": "https://example.org", "max_pages": 3})
+    assert baseline.status_code == 202
+    assert current.status_code == 202
+
+    diff_response = client.post(
+        '/jobs/diff',
+        json={
+            "baseline_job_id": baseline.json()["job_id"],
+            "current_job_id": current.json()["job_id"],
+        },
+    )
+    assert diff_response.status_code == 200
+    diff = diff_response.json()
+    assert "https://example.org/contact" in diff["pages_added"]
+    assert "https://example.com/about" in diff["pages_removed"]
+    assert diff["average_score_delta"] <= 0
+
+
+def test_cancel_job_marks_job_cancelled_when_polled_before_processing(monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, 'process_crawl_job', lambda job_id: scanner.get_crawl_job(job_id))
+
+    with TestClient(app) as delayed_client:
+        response = delayed_client.post('/jobs', json={"url": "https://example.com", "max_pages": 2})
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+
+        cancel_response = delayed_client.delete(f'/jobs/{job_id}')
+        assert cancel_response.status_code == 200
+        cancelled = cancel_response.json()
+        assert cancelled["status"] == "cancelled"
+
+
+def test_get_unknown_job_returns_not_found():
+    response = client.get('/jobs/not-a-real-job')
+    assert response.status_code == 404
