@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from app.main import app
 import app.scanner as scanner
@@ -16,7 +17,7 @@ class MockResponse:
         if self.status_code >= 400:
             raise scanner.httpx.HTTPStatusError(
                 "mock error",
-                request=scanner.httpx.Request("GET", "https://example.com"),
+                request=scanner.httpx.Request("GET", "https://www.python.org"),
                 response=scanner.httpx.Response(self.status_code),
             )
 
@@ -36,6 +37,17 @@ class MockClient:
         if normalized not in self.responses:
             raise scanner.httpx.ConnectError("mock connect error")
         return MockResponse(self.responses[normalized])
+
+
+class RecordingMockClient(MockClient):
+    def __init__(self, responses: dict[str, str], headers: dict[str, str] | None, seen_headers: list[dict[str, str] | None]):
+        super().__init__(responses)
+        self.headers = headers
+        self.seen_headers = seen_headers
+
+    def get(self, url: str):
+        self.seen_headers.append(self.headers)
+        return super().get(url)
 
 
 def test_health():
@@ -59,11 +71,11 @@ def test_scan_html_mode_and_warning():
 
 def test_scan_url_mode(monkeypatch):
     responses = {
-        "https://example.com": "<html lang='en'><body><a href='/about'>About</a></body></html>",
+        "https://www.python.org": "<html lang='en'><body><a href='/about'>About</a></body></html>",
     }
     monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
 
-    response = client.post('/scan', json={"url": "https://example.com"})
+    response = client.post('/scan', json={"url": "https://www.python.org"})
     assert response.status_code == 200
     body = response.json()
     assert body["scan_mode"] == "url"
@@ -71,13 +83,13 @@ def test_scan_url_mode(monkeypatch):
 
 
 def test_scan_requires_exactly_one_input():
-    response = client.post('/scan', json={"url": "https://example.com", "html": "<html/>"})
+    response = client.post('/scan', json={"url": "https://www.python.org", "html": "<html/>"})
     assert response.status_code == 422
 
 
 def test_batch_scan(monkeypatch):
     responses = {
-        "https://example.com": "<html lang='en'><body><a href='/about'>About</a></body></html>",
+        "https://www.python.org": "<html lang='en'><body><a href='/about'>About</a></body></html>",
     }
     monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
 
@@ -85,7 +97,7 @@ def test_batch_scan(monkeypatch):
         '/scan/batch',
         json={
             "scans": [
-                {"url": "https://example.com"},
+                {"url": "https://www.python.org"},
                 {"html": "<html><body><img src='x.png'></body></html>"},
             ]
         },
@@ -186,7 +198,7 @@ def test_scan_includes_structured_passes_and_incomplete_arrays_with_metadata():
 
 def test_batch_scan_supports_webhook_callback_registration_and_retry(monkeypatch):
     responses = {
-        "https://example.com": "<html lang='en'><body><a href='/about'>About</a></body></html>",
+        "https://developer.mozilla.org": "<html lang='en'><body><a href='/about'>About</a></body></html>",
     }
     monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
 
@@ -195,7 +207,7 @@ def test_batch_scan_supports_webhook_callback_registration_and_retry(monkeypatch
         json={
             "webhook_url": "https://webhook.site/00000000-0000-0000-0000-000000000000",
             "scans": [
-                {"url": "https://example.com"},
+                {"url": "https://developer.mozilla.org"},
                 {"html": "<html><body><img src='x.png'></body></html>"},
             ],
         },
@@ -241,13 +253,30 @@ def test_scan_diff_reports_delta_and_violation_changes():
 
 def test_create_job_processes_real_route_inventory(monkeypatch):
     responses = {
-        "https://example.com": "<html lang='en'><body><a href='/about'>About</a><a href='/contact'>Contact</a></body></html>",
-        "https://example.com/about": "<html lang='en'><body><img src='logo.png' alt='Logo'></body></html>",
-        "https://example.com/contact": "<html><body><img src='map.png'></body></html>",
+        "https://www.python.org": (
+            "<html lang='en'><body>"
+            "<a href='/about'>About</a>"
+            "<a href='/downloads'>Downloads</a>"
+            "</body></html>"
+        ),
+        "https://www.python.org/about": (
+            "<html lang='en'><body><a href='/about/apps'>Apps</a><img src='logo.png' alt='Logo'></body></html>"
+        ),
+        "https://www.python.org/downloads": "<html><body><img src='map.png'></body></html>",
+        "https://www.python.org/about/apps": "<html lang='en'><body>Apps</body></html>",
     }
     monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
 
-    response = client.post('/jobs', json={"url": "https://example.com", "max_pages": 3})
+    response = client.post(
+        '/jobs',
+        json={
+            "url": "https://www.python.org",
+            "max_pages": 4,
+            "max_depth": 2,
+            "allowed_path_prefixes": ["/about"],
+            "excluded_path_prefixes": ["/about/jobs"],
+        },
+    )
     assert response.status_code == 202
     job_id = response.json()["job_id"]
 
@@ -256,27 +285,33 @@ def test_create_job_processes_real_route_inventory(monkeypatch):
     job = job_response.json()
     assert job["status"] == "complete"
     assert job["summary"]["pages_scanned"] == 3
+    assert job["summary"]["max_depth_reached"] == 2
+    assert job["max_depth"] == 2
+    assert job["allowed_path_prefixes"] == ["/about"]
     assert job["summary"]["route_inventory"] == [
-        "https://example.com",
-        "https://example.com/about",
-        "https://example.com/contact",
+        "https://www.python.org",
+        "https://www.python.org/about",
+        "https://www.python.org/about/apps",
     ]
     assert len(job["results"]) == 3
-    assert job["results"][2]["totals"]["violations"] >= 1
+    assert job["results"][1]["depth"] == 1
+    assert job["results"][2]["depth"] == 2
+    assert job["results"][2]["parent_url"] == "https://www.python.org/about"
+    assert job["results"][2]["scan"]["score"] >= 0
 
 
 def test_jobs_diff_reports_route_inventory_changes(monkeypatch):
     responses = {
-        "https://example.com": "<html lang='en'><body><a href='/about'>About</a></body></html>",
-        "https://example.com/about": "<html lang='en'><body>About</body></html>",
-        "https://example.org": "<html lang='en'><body><a href='/about'>About</a><a href='/contact'>Contact</a></body></html>",
-        "https://example.org/about": "<html lang='en'><body>About</body></html>",
-        "https://example.org/contact": "<html><body><img src='office.png'></body></html>",
+        "https://www.w3.org": "<html lang='en'><body><a href='/about'>About</a></body></html>",
+        "https://www.w3.org/about": "<html lang='en'><body>About</body></html>",
+        "https://www.mozilla.org": "<html lang='en'><body><a href='/about'>About</a><a href='/contact'>Contact</a></body></html>",
+        "https://www.mozilla.org/about": "<html lang='en'><body>About</body></html>",
+        "https://www.mozilla.org/contact": "<html><body><img src='office.png'></body></html>",
     }
     monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
 
-    baseline = client.post('/jobs', json={"url": "https://example.com", "max_pages": 2})
-    current = client.post('/jobs', json={"url": "https://example.org", "max_pages": 3})
+    baseline = client.post('/jobs', json={"url": "https://www.w3.org", "max_pages": 2})
+    current = client.post('/jobs', json={"url": "https://www.mozilla.org", "max_pages": 3})
     assert baseline.status_code == 202
     assert current.status_code == 202
 
@@ -289,9 +324,107 @@ def test_jobs_diff_reports_route_inventory_changes(monkeypatch):
     )
     assert diff_response.status_code == 200
     diff = diff_response.json()
-    assert "https://example.org/contact" in diff["pages_added"]
-    assert "https://example.com/about" in diff["pages_removed"]
+    assert "https://www.mozilla.org/contact" in diff["pages_added"]
+    assert "https://www.w3.org/about" in diff["pages_removed"]
     assert diff["average_score_delta"] <= 0
+    assert diff["page_score_changes"] == []
+
+
+def test_jobs_diff_reports_page_level_violation_changes(monkeypatch):
+    responses = {
+        "https://www.amazon.com": "<html lang='en'><body><a href='/accessibility'>Accessibility</a></body></html>",
+        "https://www.amazon.com/accessibility": "<html><body><img src='hero.png'></body></html>",
+    }
+    updated_responses = {
+        "https://www.amazon.com": "<html lang='en'><body><a href='/accessibility'>Accessibility</a></body></html>",
+        "https://www.amazon.com/accessibility": (
+            "<html lang='en'><body><img src='hero.png' alt='Accessibility'><a href='/support'>Support</a></body></html>"
+        ),
+    }
+    monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
+    baseline = client.post('/jobs', json={"url": "https://www.amazon.com", "max_pages": 2})
+    assert baseline.status_code == 202
+
+    monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(updated_responses))
+    current = client.post('/jobs', json={"url": "https://www.amazon.com", "max_pages": 2})
+    assert current.status_code == 202
+
+    diff_response = client.post(
+        '/jobs/diff',
+        json={
+            "baseline_job_id": baseline.json()["job_id"],
+            "current_job_id": current.json()["job_id"],
+        },
+    )
+    assert diff_response.status_code == 200
+    page_changes = diff_response.json()["page_score_changes"]
+    detail = next(item for item in page_changes if item["url"] == "https://www.amazon.com/accessibility")
+    assert "image-alt" in detail["resolved_violations"]
+    assert detail["new_violations"] == []
+    assert detail["score_delta"] > 0
+
+
+def test_create_job_respects_robots_txt_and_user_agent(monkeypatch):
+    seen_headers: list[dict[str, str] | None] = []
+    responses = {
+        "https://www.microsoft.com/robots.txt": "User-agent: *\nDisallow: /private",
+        "https://www.microsoft.com": (
+            "<html lang='en'><body>"
+            "<a href='/about'>About</a>"
+            "<a href='/private'>Private</a>"
+            "</body></html>"
+        ),
+        "https://www.microsoft.com/about": "<html lang='en'><body>About</body></html>",
+    }
+
+    def client_factory(**kwargs):
+        return RecordingMockClient(responses, kwargs.get("headers"), seen_headers)
+
+    monkeypatch.setattr(scanner.httpx, 'Client', client_factory)
+
+    response = client.post(
+        '/jobs',
+        json={
+            "url": "https://www.microsoft.com",
+            "max_pages": 3,
+            "user_agent": "AccessCheckQA/1.0",
+            "respect_robots_txt": True,
+        },
+    )
+    assert response.status_code == 202
+    job = client.get(f"/jobs/{response.json()['job_id']}").json()
+    assert job["status"] == "complete"
+    assert job["summary"]["route_inventory"] == [
+        "https://www.microsoft.com",
+        "https://www.microsoft.com/about",
+    ]
+    assert all(headers["User-Agent"] == "AccessCheckQA/1.0" for headers in seen_headers if headers)
+
+
+def test_create_job_applies_request_delay(monkeypatch):
+    sleeps: list[float] = []
+    responses = {
+        "https://www.apple.com/robots.txt": "",
+        "https://www.apple.com": "<html lang='en'><body><a href='/store'>Store</a></body></html>",
+        "https://www.apple.com/store": "<html lang='en'><body>Store</body></html>",
+    }
+    monkeypatch.setattr(scanner.httpx, 'Client', lambda **kwargs: MockClient(responses))
+    monkeypatch.setattr(scanner.time, 'sleep', lambda seconds: sleeps.append(seconds))
+
+    response = client.post(
+        '/jobs',
+        json={
+            "url": "https://www.apple.com",
+            "max_pages": 2,
+            "request_delay_ms": 25,
+        },
+    )
+    assert response.status_code == 202
+    job = client.get(f"/jobs/{response.json()['job_id']}").json()
+    assert job["status"] == "complete"
+    assert job["request_delay_ms"] == 25
+    assert sleeps
+    assert all(delay == 0.025 for delay in sleeps)
 
 
 def test_cancel_job_marks_job_cancelled_when_polled_before_processing(monkeypatch):
@@ -300,7 +433,7 @@ def test_cancel_job_marks_job_cancelled_when_polled_before_processing(monkeypatc
     monkeypatch.setattr(main_module, 'process_crawl_job', lambda job_id: scanner.get_crawl_job(job_id))
 
     with TestClient(app) as delayed_client:
-        response = delayed_client.post('/jobs', json={"url": "https://example.com", "max_pages": 2})
+        response = delayed_client.post('/jobs', json={"url": "https://www.python.org", "max_pages": 2})
         assert response.status_code == 202
         job_id = response.json()["job_id"]
 
@@ -313,3 +446,22 @@ def test_cancel_job_marks_job_cancelled_when_polled_before_processing(monkeypatc
 def test_get_unknown_job_returns_not_found():
     response = client.get('/jobs/not-a-real-job')
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.amazon.com",
+        "https://www.apple.com",
+        "https://www.microsoft.com",
+    ],
+)
+def test_scan_live_public_websites(url):
+    response = client.post('/scan', json={"url": url})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scan_mode"] == "url"
+    assert body["target"].rstrip("/") == url.rstrip("/")
+    assert "coverage_disclaimer" in body
+    assert 0 <= body["score"] <= 100
+    assert body["totals"]["violations"] >= 0

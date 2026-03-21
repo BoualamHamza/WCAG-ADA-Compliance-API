@@ -27,7 +27,10 @@ Implemented so far:
   - legal coverage disclaimer
 - In-memory webhook delivery persistence and retry history tracking.
 - In-memory crawl job lifecycle tracking with discovered route inventory summaries and scan results.
+- Crawl controls for `max_depth`, `max_concurrency`, `respect_robots_txt`, `request_delay_ms`, custom `user_agent`, allowed path prefixes, and excluded path prefixes.
+- Per-page crawl result metadata (`url`, `depth`, `parent_url`, nested scan payload) plus crawl diff page score deltas and violation-level add/remove details.
 - Initial unit tests with `pytest`
+- Live integration-style tests against public brand websites (`amazon.com`, `apple.com`, `microsoft.com`) in addition to mocked coverage.
 - Progress tracking in [`PROGRESS.md`](./PROGRESS.md)
 
 ## Quickstart
