@@ -3,7 +3,11 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from app.scanner import (
     cancel_crawl_job,
     create_crawl_job,
+    create_rule_set,
     get_crawl_job,
+    get_rule_set,
+    get_rule_reference,
+    get_rule_sets,
     get_supported_rules,
     process_crawl_job,
     retry_webhook_delivery,
@@ -20,6 +24,10 @@ from app.schemas import (
     CrawlJobRequest,
     CrawlJobResponse,
     RetryWebhookResponse,
+    RuleReference,
+    RuleSetCreateRequest,
+    RuleSetResponse,
+    RuleSetsResponse,
     RulesResponse,
     ScanDiffRequest,
     ScanDiffResponse,
@@ -27,7 +35,7 @@ from app.schemas import (
     ScanResponse,
 )
 
-app = FastAPI(title="AccessCheck API", version="0.7.0")
+app = FastAPI(title="AccessCheck API", version="0.8.1")
 
 
 @app.get("/health")
@@ -37,13 +45,23 @@ def health() -> dict:
 
 @app.post("/scan", response_model=ScanResponse)
 def scan(payload: ScanRequest) -> ScanResponse:
-    return run_scan(payload)
+    try:
+        return run_scan(payload)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Rule set not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.post("/scan/batch", response_model=BatchScanResponse)
 def scan_batch(payload: BatchScanRequest) -> BatchScanResponse:
     webhook_url = str(payload.webhook_url) if payload.webhook_url else None
-    return run_batch_scan(payload.scans, webhook_url=webhook_url)
+    try:
+        return run_batch_scan(payload.scans, webhook_url=webhook_url)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Rule set not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.post("/scan/batch/{delivery_id}/retry", response_model=RetryWebhookResponse)
@@ -61,7 +79,12 @@ def scan_diff(payload: ScanDiffRequest) -> ScanDiffResponse:
 
 @app.post("/jobs", response_model=CrawlJobResponse, status_code=202)
 def create_job(payload: CrawlJobRequest, background_tasks: BackgroundTasks) -> CrawlJobResponse:
-    job = create_crawl_job(payload)
+    try:
+        job = create_crawl_job(payload)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Rule set not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     background_tasks.add_task(process_crawl_job, job.job_id)
     return job
 
@@ -95,3 +118,32 @@ def crawl_diff(payload: CrawlDiffRequest) -> CrawlDiffResponse:
 @app.get("/rules", response_model=RulesResponse)
 def rules() -> RulesResponse:
     return get_supported_rules()
+
+
+@app.get("/rules/{rule_id}", response_model=RuleReference)
+def rule_detail(rule_id: str) -> RuleReference:
+    try:
+        return get_rule_reference(rule_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Rule not found") from error
+
+
+@app.get("/rule-sets", response_model=RuleSetsResponse)
+def list_rule_sets() -> RuleSetsResponse:
+    return get_rule_sets()
+
+
+@app.post("/rule-sets", response_model=RuleSetResponse, status_code=201)
+def create_custom_rule_set(payload: RuleSetCreateRequest) -> RuleSetResponse:
+    try:
+        return create_rule_set(payload)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.get("/rule-sets/{rule_set_id}", response_model=RuleSetResponse)
+def get_custom_rule_set(rule_set_id: str) -> RuleSetResponse:
+    try:
+        return get_rule_set(rule_set_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Rule set not found") from error

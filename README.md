@@ -16,6 +16,9 @@ Implemented so far:
   - `DELETE /jobs/{job_id}` (cancel queued or running crawl jobs)
   - `POST /jobs/diff` (compare crawled route inventories and average score movement)
   - `GET /rules` (supported rule catalog)
+  - `GET /rules/{rule_id}` (single rule detail lookup)
+  - `GET /rule-sets` / `POST /rule-sets` / `GET /rule-sets/{rule_set_id}` (custom enterprise rule set management with effective rule resolution)
+- Enterprise rule targeting with `run_only`, `disable_rules`, and reusable `rule_set_id` references across scans and crawl jobs, including validation that at least one effective rule remains.
 - Structured JSON response with:
   - violations
   - passes (rule metadata + confidence)

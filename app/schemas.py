@@ -25,7 +25,15 @@ class JobStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class ScanRequest(BaseModel):
+
+
+class RuleSelectionMixin(BaseModel):
+    run_only: Optional[List[str]] = None
+    disable_rules: List[str] = Field(default_factory=list)
+    rule_set_id: Optional[str] = None
+
+
+class ScanRequest(RuleSelectionMixin):
     url: Optional[HttpUrl] = None
     html: Optional[str] = None
     include_remediation: bool = Field(default=False)
@@ -124,6 +132,29 @@ class RulesResponse(BaseModel):
     rules: List[RuleReference]
 
 
+class RuleSetCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    description: Optional[str] = Field(default=None, max_length=500)
+    include_rules: List[str] = Field(min_length=1)
+    disable_rules: List[str] = Field(default_factory=list)
+
+
+class RuleSetResponse(BaseModel):
+    rule_set_id: str
+    name: str
+    description: Optional[str] = None
+    include_rules: List[str]
+    disable_rules: List[str] = Field(default_factory=list)
+    effective_rules: List[str] = Field(default_factory=list)
+    created_at: str
+    rule_count: int
+
+
+class RuleSetsResponse(BaseModel):
+    count: int
+    rule_sets: List[RuleSetResponse]
+
+
 class RetryWebhookResponse(BaseModel):
     callback: WebhookDelivery
 
@@ -141,7 +172,7 @@ class ScanDiffResponse(BaseModel):
     resolved_violations: List[str]
 
 
-class CrawlJobRequest(BaseModel):
+class CrawlJobRequest(RuleSelectionMixin):
     url: HttpUrl
     max_pages: int = Field(default=25, ge=1, le=500)
     include_subdomains: bool = False
@@ -149,7 +180,7 @@ class CrawlJobRequest(BaseModel):
     max_depth: int = Field(default=1, ge=0, le=5)
     respect_robots_txt: bool = True
     request_delay_ms: int = Field(default=0, ge=0, le=5000)
-    user_agent: str = Field(default="AccessCheckBot/0.7.0")
+    user_agent: str = Field(default="AccessCheckBot/0.8.1")
     allowed_path_prefixes: List[str] = Field(default_factory=list)
     excluded_path_prefixes: List[str] = Field(default_factory=list)
 
@@ -182,6 +213,8 @@ class CrawlPageDiff(BaseModel):
 
 
 class CrawlJobResponse(BaseModel):
+    rule_set_id: Optional[str] = None
+    effective_rules: List[str] = Field(default_factory=list)
     job_id: str
     status: JobStatus
     root_url: str
