@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from collections import deque
 from html.parser import HTMLParser
-from typing import Dict, List, Optional
+from typing import Deque, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
+from urllib.robotparser import RobotFileParser
 from uuid import uuid4
 
 import httpx
@@ -12,6 +16,8 @@ from app.schemas import (
     BatchScanResponse,
     CheckFinding,
     CrawlDiffResponse,
+    CrawlPageDiff,
+    CrawlPageResult,
     CrawlJobRequest,
     CrawlJobResponse,
     CrawlJobSummary,
@@ -42,6 +48,7 @@ DISCLAIMER = (
 WEBHOOK_DELIVERIES: Dict[str, WebhookDelivery] = {}
 CRAWL_JOBS: Dict[str, CrawlJobResponse] = {}
 REQUEST_TIMEOUT_SECONDS = 10.0
+DEFAULT_USER_AGENT = "AccessCheckBot/0.7.0"
 
 REMEDIATION_LIBRARY: Dict[str, Dict[str, Dict[RemediationDetailLevel, str]]] = {
     "en": {
@@ -202,9 +209,21 @@ def create_crawl_job(payload: CrawlJobRequest) -> CrawlJobResponse:
         root_url=str(payload.url),
         max_pages=payload.max_pages,
         include_subdomains=payload.include_subdomains,
+        max_concurrency=payload.max_concurrency,
+        max_depth=payload.max_depth,
+        respect_robots_txt=payload.respect_robots_txt,
+        request_delay_ms=payload.request_delay_ms,
+        user_agent=payload.user_agent,
+        allowed_path_prefixes=payload.allowed_path_prefixes,
+        excluded_path_prefixes=payload.excluded_path_prefixes,
         created_at=_iso_utc(now),
         updated_at=_iso_utc(now),
-        summary=CrawlJobSummary(pages_scanned=0, pages_remaining=payload.max_pages, route_inventory=[]),
+        summary=CrawlJobSummary(
+            pages_scanned=0,
+            pages_remaining=payload.max_pages,
+            route_inventory=[],
+            max_depth_reached=0,
+        ),
         results=[],
     )
     CRAWL_JOBS[job.job_id] = job
@@ -221,8 +240,30 @@ def process_crawl_job(job_id: str) -> CrawlJobResponse:
     job.updated_at = _iso_utc(started)
 
     try:
-        route_inventory = discover_routes(job.root_url, job.max_pages, include_subdomains=job.include_subdomains)
-        results = [run_scan(ScanRequest(url=route)) for route in route_inventory]
+        route_inventory = discover_routes(
+            job.root_url,
+            job.max_pages,
+            include_subdomains=job.include_subdomains,
+            max_depth=job.max_depth,
+            respect_robots_txt=job.respect_robots_txt,
+            request_delay_ms=job.request_delay_ms,
+            user_agent=job.user_agent,
+            allowed_path_prefixes=job.allowed_path_prefixes,
+            excluded_path_prefixes=job.excluded_path_prefixes,
+        )
+        scan_routes = route_inventory
+        if job.max_concurrency > 1 and job.request_delay_ms == 0:
+            with ThreadPoolExecutor(max_workers=job.max_concurrency) as executor:
+                results = list(executor.map(lambda route: _scan_crawl_route(route, job.user_agent), scan_routes))
+        else:
+            results = []
+            for route in scan_routes:
+                results.append(_scan_crawl_route(route, job.user_agent))
+                if job.request_delay_ms > 0:
+                    time.sleep(job.request_delay_ms / 1000)
+        max_depth_reached = 0
+        for result in results:
+            max_depth_reached = max(max_depth_reached, result.depth)
     except Exception as error:  # noqa: BLE001
         failed = datetime.now(timezone.utc)
         job.status = JobStatus.FAILED
@@ -239,7 +280,8 @@ def process_crawl_job(job_id: str) -> CrawlJobResponse:
     job.summary = CrawlJobSummary(
         pages_scanned=len(results),
         pages_remaining=max(job.max_pages - len(results), 0),
-        route_inventory=route_inventory,
+        route_inventory=[route["url"] for route in route_inventory],
+        max_depth_reached=max_depth_reached,
     )
     job.results = results
     CRAWL_JOBS[job_id] = job
@@ -280,6 +322,27 @@ def run_crawl_diff(baseline_job_id: str, current_job_id: str) -> CrawlDiffRespon
     current_scores = [result.score for result in current_job.results]
     baseline_average = int(sum(baseline_scores) / len(baseline_scores)) if baseline_scores else 0
     current_average = int(sum(current_scores) / len(current_scores)) if current_scores else 0
+    baseline_pages = {result.url: result for result in baseline_job.results}
+    current_pages = {result.url: result for result in current_job.results}
+    shared_pages = sorted(baseline_routes & current_routes)
+    page_score_changes = []
+    for url in shared_pages:
+        baseline_page = baseline_pages[url]
+        current_page = current_pages[url]
+        baseline_violation_ids = {item.rule_id for item in baseline_page.scan.violations}
+        current_violation_ids = {item.rule_id for item in current_page.scan.violations}
+        page_score_changes.append(
+            CrawlPageDiff(
+                url=url,
+                baseline_score=baseline_page.score,
+                current_score=current_page.score,
+                score_delta=current_page.score - baseline_page.score,
+                baseline_violations=baseline_page.violations,
+                current_violations=current_page.violations,
+                new_violations=sorted(current_violation_ids - baseline_violation_ids),
+                resolved_violations=sorted(baseline_violation_ids - current_violation_ids),
+            )
+        )
 
     return CrawlDiffResponse(
         baseline_job_id=baseline_job_id,
@@ -288,8 +351,9 @@ def run_crawl_diff(baseline_job_id: str, current_job_id: str) -> CrawlDiffRespon
         current_pages=len(current_routes),
         pages_added=sorted(current_routes - baseline_routes),
         pages_removed=sorted(baseline_routes - current_routes),
-        pages_unchanged=sorted(baseline_routes & current_routes),
+        pages_unchanged=shared_pages,
         average_score_delta=current_average - baseline_average,
+        page_score_changes=page_score_changes,
     )
 
 
@@ -340,16 +404,50 @@ def get_supported_rules() -> RulesResponse:
     return RulesResponse(count=len(SUPPORTED_RULES), rules=SUPPORTED_RULES)
 
 
-def discover_routes(root_url: str, max_pages: int, include_subdomains: bool = False) -> List[str]:
+def discover_routes(
+    root_url: str,
+    max_pages: int,
+    include_subdomains: bool = False,
+    max_depth: int = 1,
+    respect_robots_txt: bool = True,
+    request_delay_ms: int = 0,
+    user_agent: str = DEFAULT_USER_AGENT,
+    allowed_path_prefixes: Optional[List[str]] = None,
+    excluded_path_prefixes: Optional[List[str]] = None,
+) -> List[dict]:
     normalized_root_url = root_url.rstrip('/') or root_url
-    html = _fetch_url_content(normalized_root_url)
-    discovered = _extract_same_site_links(normalized_root_url, html, include_subdomains=include_subdomains)
-    routes = [normalized_root_url]
-    for link in discovered:
-        if link not in routes:
-            routes.append(link)
-        if len(routes) >= max_pages:
-            break
+    allowed_path_prefixes = allowed_path_prefixes or []
+    excluded_path_prefixes = excluded_path_prefixes or []
+    routes: List[dict] = [{"url": normalized_root_url, "depth": 0, "parent_url": None}]
+    seen = {normalized_root_url}
+    queue: Deque[dict] = deque(routes)
+    robot_parser = _load_robots_parser(normalized_root_url, user_agent) if respect_robots_txt else None
+
+    while queue and len(routes) < max_pages:
+        current = queue.popleft()
+        if current["depth"] >= max_depth:
+            continue
+        html = _fetch_url_content(current["url"], user_agent=user_agent)
+        discovered = _extract_same_site_links(
+            current["url"],
+            html,
+            include_subdomains=include_subdomains,
+            robot_parser=robot_parser,
+            user_agent=user_agent,
+            allowed_path_prefixes=allowed_path_prefixes,
+            excluded_path_prefixes=excluded_path_prefixes,
+        )
+        for link in discovered:
+            if link in seen:
+                continue
+            page = {"url": link, "depth": current["depth"] + 1, "parent_url": current["url"]}
+            seen.add(link)
+            routes.append(page)
+            queue.append(page)
+            if len(routes) >= max_pages:
+                break
+        if request_delay_ms > 0:
+            time.sleep(request_delay_ms / 1000)
     return routes[:max_pages]
 
 
@@ -364,14 +462,28 @@ def _resolve_scan_source(payload: ScanRequest) -> str:
     return ""
 
 
-def _fetch_url_content(url: str) -> str:
-    with httpx.Client(follow_redirects=True, timeout=REQUEST_TIMEOUT_SECONDS) as client:
+def _fetch_url_content(url: str, user_agent: str = DEFAULT_USER_AGENT) -> str:
+    with httpx.Client(
+        follow_redirects=True,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        headers={"User-Agent": user_agent},
+    ) as client:
         response = client.get(url)
         response.raise_for_status()
         return response.text
 
 
-def _extract_same_site_links(root_url: str, html: str, include_subdomains: bool = False) -> List[str]:
+def _extract_same_site_links(
+    root_url: str,
+    html: str,
+    include_subdomains: bool = False,
+    robot_parser: Optional[RobotFileParser] = None,
+    user_agent: str = DEFAULT_USER_AGENT,
+    allowed_path_prefixes: Optional[List[str]] = None,
+    excluded_path_prefixes: Optional[List[str]] = None,
+) -> List[str]:
+    allowed_path_prefixes = allowed_path_prefixes or []
+    excluded_path_prefixes = excluded_path_prefixes or []
     parser = _LinkExtractor()
     parser.feed(html)
     root = urlparse(root_url)
@@ -382,6 +494,12 @@ def _extract_same_site_links(root_url: str, html: str, include_subdomains: bool 
         if parsed.scheme not in {"http", "https"}:
             continue
         if not _is_same_site(root.hostname or "", parsed.hostname or "", include_subdomains):
+            continue
+        if robot_parser and not robot_parser.can_fetch(user_agent, absolute):
+            continue
+        if excluded_path_prefixes and any(parsed.path.startswith(prefix) for prefix in excluded_path_prefixes):
+            continue
+        if allowed_path_prefixes and not any(parsed.path.startswith(prefix) for prefix in allowed_path_prefixes):
             continue
         normalized = absolute.rstrip("/") or absolute
         if normalized not in links:
@@ -395,6 +513,32 @@ def _is_same_site(root_host: str, candidate_host: str, include_subdomains: bool)
     if include_subdomains and candidate_host.endswith(f".{root_host}"):
         return True
     return False
+
+
+def _load_robots_parser(root_url: str, user_agent: str) -> RobotFileParser:
+    parser = RobotFileParser()
+    robots_url = urljoin(root_url, "/robots.txt")
+    try:
+        parser.parse(_fetch_url_content(robots_url, user_agent=user_agent).splitlines())
+    except httpx.HTTPError:
+        parser.parse([])
+    return parser
+
+
+def _scan_crawl_route(route: dict, user_agent: str) -> CrawlPageResult:
+    source = _fetch_url_content(route["url"], user_agent=user_agent)
+    scan = run_scan(ScanRequest(html=source))
+    scan.scan_mode = ScanMode.URL
+    scan.target = route["url"]
+    scan.static_scan_warning = False
+    return CrawlPageResult(
+        url=route["url"],
+        depth=route["depth"],
+        parent_url=route["parent_url"],
+        score=scan.score,
+        violations=scan.totals["violations"],
+        scan=scan,
+    )
 
 
 def _collect_violations(

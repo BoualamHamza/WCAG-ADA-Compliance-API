@@ -19,17 +19,18 @@
 - Added persistence for queued webhook deliveries and retry tracking with `POST /scan/batch/{delivery_id}/retry`.
 - Expanded pass/incomplete findings to include structured rule metadata (`wcag_sc`, `impact`) and confidence scores.
 
-## Phase 3 — In progress
+## Phase 3 — Completed
 
 ### Completed this phase
 - Added `POST /scan/diff` endpoint to compare baseline/current scans and report score deltas plus violation changes.
 - Added async crawl job lifecycle support with `POST /jobs`, `GET /jobs/{job_id}`, and `DELETE /jobs/{job_id}`.
 - Added live URL fetching for public site scans so URL mode analyzes retrieved HTML instead of only the URL string.
 - Added discovered route inventory diffing with `POST /jobs/diff` and average score delta reporting for completed crawl jobs.
-
-### Next in Phase 3
-- Expand crawl configuration controls beyond the initial same-site route discovery flow.
-- Add richer crawl result metadata for per-page change tracking across crawl diffs.
+- Expanded crawl configuration with `max_depth`, `allowed_path_prefixes`, and `excluded_path_prefixes`.
+- Added richer crawl metadata with per-page depth/parent tracking and per-page score delta summaries in crawl diffs.
+- Added live test coverage against real public brand websites in addition to deterministic mocked tests.
+- Added crawl politeness controls for `respect_robots_txt`, `request_delay_ms`, and custom `user_agent` handling.
+- Added crawl concurrency control via `max_concurrency` and richer per-page diff details for new/resolved violations on matching routes.
 
 ## Upcoming Phases
 - **Phase 4:** Enterprise controls and integrations.
@@ -44,3 +45,5 @@
 - Started Phase 3 with scan diff capabilities.
 - Completed async crawl jobs lifecycle endpoints and in-memory job tracking.
 - Extended Phase 3 with live website fetching and crawl route inventory diff support.
+- Added configurable crawl depth/path filters, page-level crawl metadata, and live public-brand-site test coverage.
+- Completed Phase 3 with crawl politeness/concurrency controls and violation-level page diff reporting.

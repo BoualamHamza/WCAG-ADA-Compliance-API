@@ -145,12 +145,40 @@ class CrawlJobRequest(BaseModel):
     url: HttpUrl
     max_pages: int = Field(default=25, ge=1, le=500)
     include_subdomains: bool = False
+    max_concurrency: int = Field(default=1, ge=1, le=10)
+    max_depth: int = Field(default=1, ge=0, le=5)
+    respect_robots_txt: bool = True
+    request_delay_ms: int = Field(default=0, ge=0, le=5000)
+    user_agent: str = Field(default="AccessCheckBot/0.7.0")
+    allowed_path_prefixes: List[str] = Field(default_factory=list)
+    excluded_path_prefixes: List[str] = Field(default_factory=list)
 
 
 class CrawlJobSummary(BaseModel):
     pages_scanned: int
     pages_remaining: int
     route_inventory: List[str] = Field(default_factory=list)
+    max_depth_reached: int = 0
+
+
+class CrawlPageResult(BaseModel):
+    url: str
+    depth: int
+    parent_url: Optional[str] = None
+    score: int
+    violations: int
+    scan: ScanResponse
+
+
+class CrawlPageDiff(BaseModel):
+    url: str
+    baseline_score: int
+    current_score: int
+    score_delta: int
+    baseline_violations: int
+    current_violations: int
+    new_violations: List[str] = Field(default_factory=list)
+    resolved_violations: List[str] = Field(default_factory=list)
 
 
 class CrawlJobResponse(BaseModel):
@@ -159,11 +187,18 @@ class CrawlJobResponse(BaseModel):
     root_url: str
     max_pages: int
     include_subdomains: bool
+    max_concurrency: int
+    max_depth: int
+    respect_robots_txt: bool
+    request_delay_ms: int
+    user_agent: str
+    allowed_path_prefixes: List[str] = Field(default_factory=list)
+    excluded_path_prefixes: List[str] = Field(default_factory=list)
     created_at: str
     updated_at: str
     completed_at: Optional[str] = None
     summary: CrawlJobSummary
-    results: List[ScanResponse] = Field(default_factory=list)
+    results: List[CrawlPageResult] = Field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -181,3 +216,4 @@ class CrawlDiffResponse(BaseModel):
     pages_removed: List[str]
     pages_unchanged: List[str]
     average_score_delta: int
+    page_score_changes: List[CrawlPageDiff] = Field(default_factory=list)

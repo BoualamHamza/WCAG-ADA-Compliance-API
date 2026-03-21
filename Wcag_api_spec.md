@@ -521,14 +521,18 @@ For full-site crawls, the API uses an async job model to handle large workloads 
 
 | Parameter | Description |
 |---|---|
-| `max_pages` | Maximum pages to crawl. Default 50. Max 500 (Business tier), unlimited (Enterprise). |
-| `max_depth` | Maximum link depth from the root URL. Default 3. |
-| `include_patterns` | URL patterns (glob or regex) to include in the crawl. |
-| `exclude_patterns` | URL patterns to exclude (e.g., `"/blog/*"`, `"/admin/*"`). |
-| `respect_robots_txt` | Whether to obey the site's robots.txt. Default `true`. |
-| `same_domain_only` | Whether to follow links to external domains. Default `true`. |
-| `scan_options` | The same scan options as the synchronous `POST /scan` endpoint, applied to every page. |
-| `concurrency` | How many pages to scan simultaneously. Default 3. Max 10 (Enterprise only). |
+| `max_pages` | Maximum pages to crawl. Current implementation default 25, max 500. |
+| `max_depth` | Maximum link depth from the root URL. Current implementation default 1, max 5. |
+| `max_concurrency` | Maximum concurrent page scans during crawl result analysis. Current implementation default 1, max 10. |
+| `respect_robots_txt` | Whether route discovery respects the site's `robots.txt`. Default `true`. |
+| `request_delay_ms` | Optional delay between crawl requests in milliseconds. Default `0`. |
+| `user_agent` | Custom user agent used for crawl fetches and robots.txt evaluation. |
+| `allowed_path_prefixes` | Optional path prefixes to include in the crawl (for example `["/about", "/docs"]`). |
+| `excluded_path_prefixes` | Optional path prefixes to exclude from the crawl. |
+| `include_subdomains` | Whether to follow links on subdomains of the root host. Default `false`. |
+| `same_domain_only` | The current implementation always stays on the same site, with optional subdomain support only. |
+| `result_metadata` | Each crawled page returns `url`, `depth`, `parent_url`, `score`, `violations`, and the nested scan payload. |
+| `crawl_diff_metadata` | Crawl diffs include `page_score_changes` for shared routes, including score deltas and new/resolved violation IDs. |
 
 ---
 

@@ -27,7 +27,7 @@ from app.schemas import (
     ScanResponse,
 )
 
-app = FastAPI(title="AccessCheck API", version="0.5.0")
+app = FastAPI(title="AccessCheck API", version="0.7.0")
 
 
 @app.get("/health")
