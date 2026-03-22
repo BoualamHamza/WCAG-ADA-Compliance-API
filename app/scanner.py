@@ -13,6 +13,8 @@ from uuid import uuid4
 import httpx
 
 from app.schemas import (
+    AuditLogEntry,
+    AuditLogsResponse,
     BatchScanResponse,
     CheckFinding,
     CrawlDiffResponse,
@@ -33,6 +35,8 @@ from app.schemas import (
     ScanMode,
     ScanRequest,
     ScanResponse,
+    StandardReference,
+    StandardsResponse,
     Violation,
     WebhookDelivery,
     WebhookDeliveryAttempt,
@@ -51,6 +55,7 @@ DISCLAIMER = (
 WEBHOOK_DELIVERIES: Dict[str, WebhookDelivery] = {}
 CRAWL_JOBS: Dict[str, CrawlJobResponse] = {}
 RULE_SETS: Dict[str, RuleSetResponse] = {}
+AUDIT_LOGS: Dict[str, AuditLogEntry] = {}
 REQUEST_TIMEOUT_SECONDS = 10.0
 DEFAULT_USER_AGENT = "AccessCheckBot/0.8.1"
 
@@ -129,34 +134,52 @@ SUPPORTED_RULES: List[RuleReference] = [
         description="Image elements must have alternate text.",
         wcag_sc="1.1.1",
         impact="serious",
+        standards=["wcag20a", "wcag20aa", "wcag21a", "wcag21aa", "wcag22a", "wcag22aa", "section508", "eaa"],
     ),
     RuleReference(
         rule_id="html-has-lang",
         description="The html element must have a lang attribute.",
         wcag_sc="3.1.1",
         impact="moderate",
+        standards=["wcag20a", "wcag20aa", "wcag21a", "wcag21aa", "wcag22a", "wcag22aa", "section508", "eaa"],
     ),
     RuleReference(
         rule_id="valid-anchor",
         description="Anchor elements should have a valid href attribute.",
         wcag_sc="2.4.4",
         impact="minor",
+        standards=["wcag21a", "wcag21aa", "wcag22a", "wcag22aa", "best-practice"],
     ),
     RuleReference(
         rule_id="video-captions",
         description="Video caption quality requires manual verification.",
         wcag_sc="1.2.2",
         impact="serious",
+        standards=["wcag20a", "wcag20aa", "wcag21a", "wcag21aa", "wcag22a", "wcag22aa", "section508", "eaa"],
     ),
     RuleReference(
         rule_id="keyboard-operability",
         description="Interactive keyboard behavior requires manual verification.",
         wcag_sc="2.1.1",
         impact="moderate",
+        standards=["wcag20a", "wcag20aa", "wcag21a", "wcag21aa", "wcag22a", "wcag22aa", "section508", "eaa"],
+        new_in_wcag22=False,
     ),
 ]
 RULE_REFERENCE_MAP: Dict[str, RuleReference] = {rule.rule_id: rule for rule in SUPPORTED_RULES}
 SUPPORTED_RULE_IDS: Set[str] = set(RULE_REFERENCE_MAP)
+SUPPORTED_STANDARDS: List[StandardReference] = [
+    StandardReference(standard_id="wcag20a", name="WCAG 2.0 Level A", jurisdiction="Global", rule_count=4),
+    StandardReference(standard_id="wcag20aa", name="WCAG 2.0 Level AA", jurisdiction="Global (legacy)", rule_count=4),
+    StandardReference(standard_id="wcag21a", name="WCAG 2.1 Level A", jurisdiction="EU Web Accessibility Directive baseline", rule_count=5),
+    StandardReference(standard_id="wcag21aa", name="WCAG 2.1 Level AA", jurisdiction="Current global default; US ADA standard", rule_count=5),
+    StandardReference(standard_id="wcag22a", name="WCAG 2.2 Level A", jurisdiction="Current W3C recommendation", rule_count=5),
+    StandardReference(standard_id="wcag22aa", name="WCAG 2.2 Level AA", jurisdiction="Current best-practice baseline", rule_count=5, is_default=True),
+    StandardReference(standard_id="wcag22aaa", name="WCAG 2.2 Level AAA", jurisdiction="Aspirational maximum compliance", rule_count=5),
+    StandardReference(standard_id="section508", name="Section 508 (Revised 2018)", jurisdiction="United States federal", rule_count=4),
+    StandardReference(standard_id="eaa", name="EN 301 549 / EAA", jurisdiction="European Union", rule_count=4),
+    StandardReference(standard_id="best-practice", name="Axe Best Practices", jurisdiction="Developer quality guidance", rule_count=1),
+]
 
 
 class _LinkExtractor(HTMLParser):
@@ -194,7 +217,7 @@ def run_scan(payload: ScanRequest) -> ScanResponse:
 
     score = compliance_score(v.impact for v in violations)
     pour = pour_breakdown(score)
-    return ScanResponse(
+    response = ScanResponse(
         scan_mode=mode,
         target=target,
         violations=violations,
@@ -211,6 +234,20 @@ def run_scan(payload: ScanRequest) -> ScanResponse:
         static_scan_warning=mode == ScanMode.HTML,
         coverage_disclaimer=DISCLAIMER,
     )
+    _record_audit_log(
+        event_type="scan.completed",
+        resource_type="scan",
+        resource_id=target,
+        status="success",
+        message=f"Completed {mode.value} scan.",
+        metadata={
+            "rule_set_id": payload.rule_set_id,
+            "effective_rules": sorted(effective_rules),
+            "violations": response.totals["violations"],
+            "score": response.score,
+        },
+    )
+    return response
 
 
 def run_batch_scan(scans: List[ScanRequest], webhook_url: Optional[str] = None) -> BatchScanResponse:
@@ -260,6 +297,14 @@ def create_crawl_job(payload: CrawlJobRequest) -> CrawlJobResponse:
         results=[],
     )
     CRAWL_JOBS[job.job_id] = job
+    _record_audit_log(
+        event_type="crawl.created",
+        resource_type="crawl_job",
+        resource_id=job.job_id,
+        status=job.status.value,
+        message="Created crawl job.",
+        metadata={"root_url": job.root_url, "max_pages": job.max_pages, "rule_set_id": job.rule_set_id},
+    )
     return job
 
 
@@ -306,6 +351,14 @@ def process_crawl_job(job_id: str) -> CrawlJobResponse:
         job.completed_at = _iso_utc(failed)
         job.error = str(error)
         CRAWL_JOBS[job_id] = job
+        _record_audit_log(
+            event_type="crawl.failed",
+            resource_type="crawl_job",
+            resource_id=job.job_id,
+            status=job.status.value,
+            message="Crawl job failed.",
+            metadata={"error": job.error},
+        )
         return job
 
     finished = datetime.now(timezone.utc)
@@ -320,6 +373,14 @@ def process_crawl_job(job_id: str) -> CrawlJobResponse:
     )
     job.results = results
     CRAWL_JOBS[job_id] = job
+    _record_audit_log(
+        event_type="crawl.completed",
+        resource_type="crawl_job",
+        resource_id=job.job_id,
+        status=job.status.value,
+        message="Crawl job completed.",
+        metadata={"pages_scanned": job.summary.pages_scanned, "max_depth_reached": job.summary.max_depth_reached},
+    )
     return job
 
 
@@ -341,6 +402,14 @@ def cancel_crawl_job(job_id: str) -> CrawlJobResponse:
     job.completed_at = _iso_utc(now)
     job.summary.pages_remaining = max(job.max_pages - job.summary.pages_scanned, 0)
     CRAWL_JOBS[job_id] = job
+    _record_audit_log(
+        event_type="crawl.cancelled",
+        resource_type="crawl_job",
+        resource_id=job.job_id,
+        status=job.status.value,
+        message="Crawl job cancelled.",
+        metadata={"pages_scanned": job.summary.pages_scanned},
+    )
     return job
 
 
@@ -439,6 +508,10 @@ def get_supported_rules() -> RulesResponse:
     return RulesResponse(count=len(SUPPORTED_RULES), rules=SUPPORTED_RULES)
 
 
+def get_supported_standards() -> StandardsResponse:
+    return StandardsResponse(count=len(SUPPORTED_STANDARDS), standards=SUPPORTED_STANDARDS)
+
+
 def get_rule_reference(rule_id: str) -> RuleReference:
     rule = RULE_REFERENCE_MAP.get(rule_id)
     if rule is None:
@@ -463,6 +536,14 @@ def create_rule_set(payload: RuleSetCreateRequest) -> RuleSetResponse:
         rule_count=len(effective_rules),
     )
     RULE_SETS[rule_set.rule_set_id] = rule_set
+    _record_audit_log(
+        event_type="rule_set.created",
+        resource_type="rule_set",
+        resource_id=rule_set.rule_set_id,
+        status="success",
+        message="Custom rule set created.",
+        metadata={"name": rule_set.name, "rule_count": rule_set.rule_count},
+    )
     return rule_set
 
 
@@ -476,6 +557,18 @@ def get_rule_set(rule_set_id: str) -> RuleSetResponse:
 def get_rule_sets() -> RuleSetsResponse:
     rule_sets = sorted(RULE_SETS.values(), key=lambda item: item.created_at)
     return RuleSetsResponse(count=len(rule_sets), rule_sets=rule_sets)
+
+
+def get_audit_logs() -> AuditLogsResponse:
+    logs = sorted(AUDIT_LOGS.values(), key=lambda item: item.occurred_at, reverse=True)
+    return AuditLogsResponse(count=len(logs), audit_logs=logs)
+
+
+def get_audit_log(event_id: str) -> AuditLogEntry:
+    entry = AUDIT_LOGS.get(event_id)
+    if entry is None:
+        raise KeyError(event_id)
+    return entry
 
 
 def discover_routes(
@@ -767,7 +860,37 @@ def _register_webhook_delivery(url: Optional[str], total_scans: int) -> Optional
         history=[],
     )
     WEBHOOK_DELIVERIES[delivery_id] = delivery
+    _record_audit_log(
+        event_type="webhook.registered",
+        resource_type="webhook_delivery",
+        resource_id=delivery_id,
+        status=delivery.status,
+        message="Registered batch webhook delivery.",
+        metadata={"webhook_url": url, "total_scans": total_scans},
+    )
     return delivery
+
+
+def _record_audit_log(
+    event_type: str,
+    resource_type: str,
+    resource_id: str,
+    status: str,
+    message: str,
+    metadata: Optional[dict] = None,
+) -> AuditLogEntry:
+    entry = AuditLogEntry(
+        event_id=str(uuid4()),
+        event_type=event_type,
+        occurred_at=_iso_utc(datetime.now(timezone.utc)),
+        resource_type=resource_type,
+        resource_id=resource_id,
+        status=status,
+        message=message,
+        metadata=metadata or {},
+    )
+    AUDIT_LOGS[entry.event_id] = entry
+    return entry
 
 
 def _violation(

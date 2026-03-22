@@ -16,9 +16,12 @@ Implemented so far:
   - `DELETE /jobs/{job_id}` (cancel queued or running crawl jobs)
   - `POST /jobs/diff` (compare crawled route inventories and average score movement)
   - `GET /rules` (supported rule catalog)
+  - `GET /standards` (supported compliance standards catalog)
   - `GET /rules/{rule_id}` (single rule detail lookup)
   - `GET /rule-sets` / `POST /rule-sets` / `GET /rule-sets/{rule_set_id}` (custom enterprise rule set management with effective rule resolution)
+  - `GET /audit-logs` / `GET /audit-logs/{event_id}` (enterprise audit trail for scans, jobs, rule sets, and webhook registrations)
 - Enterprise rule targeting with `run_only`, `disable_rules`, and reusable `rule_set_id` references across scans and crawl jobs, including validation that at least one effective rule remains.
+- Standards metadata on the rule catalog plus a dedicated standards catalog covering WCAG, Section 508, EAA, and best-practice tags.
 - Structured JSON response with:
   - violations
   - passes (rule metadata + confidence)

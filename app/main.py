@@ -4,11 +4,14 @@ from app.scanner import (
     cancel_crawl_job,
     create_crawl_job,
     create_rule_set,
+    get_audit_log,
+    get_audit_logs,
     get_crawl_job,
     get_rule_set,
     get_rule_reference,
     get_rule_sets,
     get_supported_rules,
+    get_supported_standards,
     process_crawl_job,
     retry_webhook_delivery,
     run_batch_scan,
@@ -17,6 +20,8 @@ from app.scanner import (
     run_scan,
 )
 from app.schemas import (
+    AuditLogEntry,
+    AuditLogsResponse,
     BatchScanRequest,
     BatchScanResponse,
     CrawlDiffRequest,
@@ -33,6 +38,7 @@ from app.schemas import (
     ScanDiffResponse,
     ScanRequest,
     ScanResponse,
+    StandardsResponse,
 )
 
 app = FastAPI(title="AccessCheck API", version="0.8.1")
@@ -120,6 +126,11 @@ def rules() -> RulesResponse:
     return get_supported_rules()
 
 
+@app.get("/standards", response_model=StandardsResponse)
+def standards() -> StandardsResponse:
+    return get_supported_standards()
+
+
 @app.get("/rules/{rule_id}", response_model=RuleReference)
 def rule_detail(rule_id: str) -> RuleReference:
     try:
@@ -147,3 +158,16 @@ def get_custom_rule_set(rule_set_id: str) -> RuleSetResponse:
         return get_rule_set(rule_set_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="Rule set not found") from error
+
+
+@app.get("/audit-logs", response_model=AuditLogsResponse)
+def list_audit_logs() -> AuditLogsResponse:
+    return get_audit_logs()
+
+
+@app.get("/audit-logs/{event_id}", response_model=AuditLogEntry)
+def audit_log_detail(event_id: str) -> AuditLogEntry:
+    try:
+        return get_audit_log(event_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Audit log not found") from error

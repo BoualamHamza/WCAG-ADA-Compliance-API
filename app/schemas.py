@@ -125,11 +125,26 @@ class RuleReference(BaseModel):
     description: str
     wcag_sc: str
     impact: str
+    standards: List[str] = Field(default_factory=list)
+    new_in_wcag22: bool = False
 
 
 class RulesResponse(BaseModel):
     count: int
     rules: List[RuleReference]
+
+
+class StandardReference(BaseModel):
+    standard_id: str
+    name: str
+    jurisdiction: str
+    rule_count: int
+    is_default: bool = False
+
+
+class StandardsResponse(BaseModel):
+    count: int
+    standards: List[StandardReference]
 
 
 class RuleSetCreateRequest(BaseModel):
@@ -153,6 +168,22 @@ class RuleSetResponse(BaseModel):
 class RuleSetsResponse(BaseModel):
     count: int
     rule_sets: List[RuleSetResponse]
+
+
+class AuditLogEntry(BaseModel):
+    event_id: str
+    event_type: str
+    occurred_at: str
+    resource_type: str
+    resource_id: str
+    status: str
+    message: str
+    metadata: dict = Field(default_factory=dict)
+
+
+class AuditLogsResponse(BaseModel):
+    count: int
+    audit_logs: List[AuditLogEntry]
 
 
 class RetryWebhookResponse(BaseModel):
